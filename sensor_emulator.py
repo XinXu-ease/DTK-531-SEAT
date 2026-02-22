@@ -38,7 +38,7 @@ def input_listener():
     print("Press 0 for Unseated, 1 for Balanced, 2 for Unbalanced, q to quit")
     while True:
         cmd = input("> ").strip()
-        if cmd in ("1", "2"):
+        if cmd in ("0","1", "2"):
             with lock:
                 current_mode = cmd
             print(f"Switched to mode {cmd}")
@@ -52,7 +52,7 @@ try:
         with lock:
             mode = current_mode
             
-        TOPIC = "Balancestate"
+        TOPIC = "chair/sensors"
         payload = {
             "timestamp": time.time(),
             "seattype": 1 if sum(patterns[mode]) > 0.2 else 0, 
