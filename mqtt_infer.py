@@ -15,14 +15,14 @@ last_timestamp = None
 time_sit = 0.0
 time_blc = 0.0
 
-sit_time_day = 0.0
-blc_count_day = 0
-blc_time_day = 0.0
-pressure_samples_day = []
-
-prev_blc_bad = 0
-last_ts_day = None
-current_date = None 
+segment_date = None
+seg_start_ts = None
+seg_last_ts = None
+seg_sit_sec = 0.0
+seg_blc_sec = 0.0
+seg_blc_count = 0
+seg_prev_blc_bad = 0
+prev_seattype = 0
 
 current_user_id = "u1"
 
@@ -58,30 +58,72 @@ def init_db(db_path="chair.db"):
     updated_at REAL NOT NULL,
     PRIMARY KEY(date, user_id)
     );""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS daily_segments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        sit_duration_sec REAL NOT NULL,
+        blc_duration_sec REAL NOT NULL,
+        blc_count INTEGER NOT NULL,
+        start_ts REAL NOT NULL,
+        end_ts REAL NOT NULL,
+        created_at REAL NOT NULL
+    );
+    """)
+    conn.commit()
     return conn
 
-def save_daily_summary(conn, user_id):
-    conn.execute("""
-    INSERT INTO daily_summary
-      (date, user_id, sit_time_sec, blc_count, blc_time_sec, pressure_json, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(date, user_id) DO UPDATE SET
-      sit_time_sec=excluded.sit_time_sec,
-      blc_count=excluded.blc_count,
-      blc_time_sec=excluded.blc_time_sec,
-      pressure_json=excluded.pressure_json,
-      updated_at=excluded.updated_at
-    """, (
-        current_date,
-        user_id,
-        float(sit_time_day),
-        int(blc_count_day),
-        float(blc_time_day),
-        json.dumps(pressure_samples_day),
-        time.time()
-    ))
+def save_daily_segment(conn, user_id, date, sit_sec, blc_sec, blc_count, start_ts, end_ts):
+    conn.execute(
+        """
+        INSERT INTO daily_segments
+          (date, user_id, sit_duration_sec, blc_duration_sec, blc_count, start_ts, end_ts, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(date),
+            str(user_id),
+            float(sit_sec),
+            float(blc_sec),
+            int(blc_count),
+            float(start_ts),
+            float(end_ts),
+            time.time(),
+        ),
+    )
     conn.commit()
-    
+
+
+def flush_current_segment(conn, user_id, fallback_ts=None):
+    global segment_date, seg_start_ts, seg_last_ts
+    global seg_sit_sec, seg_blc_sec, seg_blc_count, seg_prev_blc_bad
+
+    if seg_start_ts is None:
+        return
+
+    end_ts = seg_last_ts if seg_last_ts is not None else (fallback_ts if fallback_ts is not None else time.time())
+    date_key = segment_date or datetime.fromtimestamp(end_ts).date().isoformat()
+
+    if seg_sit_sec > 0 or seg_blc_sec > 0 or seg_blc_count > 0:
+        save_daily_segment(
+            conn,
+            user_id,
+            date_key,
+            seg_sit_sec,
+            seg_blc_sec,
+            seg_blc_count,
+            seg_start_ts,
+            end_ts,
+        )
+
+    segment_date = None
+    seg_start_ts = None
+    seg_last_ts = None
+    seg_sit_sec = 0.0
+    seg_blc_sec = 0.0
+    seg_blc_count = 0
+    seg_prev_blc_bad = 0
 
 def insert_sample(conn, user_id, ts, pressure, y):
     conn.execute(
@@ -143,7 +185,10 @@ def get_threshold(conn, user_id, default=0.5):
     return float(row[0]) if row else default
 
 def start_record(user_id, label, duration):
-    global recording, record_user_id, record_label, record_end_ts, current_user_id
+    global recording, record_user_id, record_label, record_end_ts, current_user_id, prev_seattype
+    if current_user_id != user_id:
+        flush_current_segment(conn, current_user_id, time.time())
+        prev_seattype = 0
     recording = True
     record_user_id = user_id
     record_label = int(label)
@@ -208,7 +253,7 @@ def on_connect(client, userdata, flags, rc):
         print(f"Connection failed with code {rc}")
 
 def on_message(client, userdata, msg):
-    global recording, record_end_ts, record_user_id, record_label, current_user_id
+    global recording, record_end_ts, record_user_id, record_label, current_user_id, prev_seattype
 
     payload_text = msg.payload.decode()
 
@@ -217,6 +262,9 @@ def on_message(client, userdata, msg):
             user_data = json.loads(payload_text)
             new_user_id = str(user_data["user_id"]).strip()
             if new_user_id:
+                if current_user_id != new_user_id:
+                    flush_current_segment(conn, current_user_id, time.time())
+                    prev_seattype = 0
                 current_user_id = new_user_id
                 print(f"[CONTROL] Active user switched to: {current_user_id}")
         except Exception as e:
@@ -259,46 +307,33 @@ def on_message(client, userdata, msg):
         blc_bad = 1 if p_bad >= thr else 0
         sit_duration, blc_duration = Timers(seattype, current_ts, blc_bad)
 
-        # Daily stat
-        global sit_time_day, blc_count_day, blc_time_day
-        global pressure_samples_day, prev_blc_bad
-        global last_ts_day, current_date
+        # Segment stats: flush on state transitions, not every second.
+        global segment_date, seg_start_ts, seg_last_ts
+        global seg_sit_sec, seg_blc_sec, seg_blc_count, seg_prev_blc_bad
+        current_day = datetime.fromtimestamp(current_ts).date().isoformat()
 
-        def date_key(ts):
-            return datetime.fromtimestamp(ts).date().isoformat()
-        d = date_key(current_ts)
-
-        if current_date is None:
-            current_date = d
-            last_ts_day = current_ts
-
-        if d != current_date:
-            if current_user_id:
-                save_daily_summary(conn, current_user_id)
-            # 简单清零（后续可以加 flush）
-            sit_time_day = 0.0
-            blc_count_day = 0
-            blc_time_day = 0.0
-            pressure_samples_day = []
-            current_date = d
-            last_ts_day = current_ts
-
-        dt = current_ts - last_ts_day if last_ts_day else 0.0
-        last_ts_day = current_ts
+        if segment_date is not None and current_day != segment_date:
+            flush_current_segment(conn, current_user_id, current_ts)
+            prev_seattype = 0
 
         if seattype == 1:
-            sit_time_day += dt
-            pressure_samples_day.append(pressure)
+            if seg_start_ts is None:
+                segment_date = current_day
+                seg_start_ts = current_ts
+                seg_last_ts = current_ts
+            dt = max(0.0, current_ts - seg_last_ts) if seg_last_ts is not None else 0.0
+            seg_last_ts = current_ts
+            seg_sit_sec += dt
 
             if blc_bad == 1:
-               blc_time_day += dt
+                seg_blc_sec += dt
+            if seg_prev_blc_bad == 0 and blc_bad == 1:
+                seg_blc_count += 1
+            seg_prev_blc_bad = blc_bad
+        elif prev_seattype == 1:
+            flush_current_segment(conn, current_user_id, current_ts)
 
-            if prev_blc_bad == 0 and blc_bad == 1:
-                blc_count_day += 1
-
-        prev_blc_bad = blc_bad
-        if current_user_id:
-            save_daily_summary(conn, current_user_id)
+        prev_seattype = int(seattype)
     
     result = {
         "timestamp": current_ts,
@@ -329,5 +364,6 @@ try:
         time.sleep(1)
 except KeyboardInterrupt:
     print("Stopping subscriber...")
+    flush_current_segment(conn, current_user_id, time.time())
     subscriber.loop_stop()
     subscriber.disconnect()
