@@ -10,7 +10,31 @@ st.set_page_config(page_title="Seat Posture Simulator", page_icon=":chair:", lay
 
 @st.cache_resource
 def get_mqtt_client():
-    c = mqtt.Client()
+    c = mqtt.Client(client_id="remote-chair-ui")
+    
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("[MQTT] Connected, subscribing to chair/sensors")
+            client.subscribe("chair/sensors", qos=1)
+        else:
+            print(f"[MQTT] 连接失败: {rc}")
+    
+    def on_message(client, userdata, msg):
+        try:
+            payload = json.loads(msg.payload.decode())
+            st.session_state.seattype = bool(payload.get("seattype", 0))
+            st.session_state.blc_bad = bool(payload.get("blc_bad", 0))
+            st.session_state.time_sit = float(payload.get("time_sit", 0))
+            st.session_state.time_blc = float(payload.get("time_blc", 0))
+            st.session_state.raw_values = payload.get("raw_values", [0,0,0,0])
+            st.session_state.norm_values = payload.get("norm_values", [0,0,0,0])
+            st.session_state.should_vibrate = bool(payload.get("should_vibrate", 0))
+            st.session_state.mqtt_timestamp = payload.get("timestamp")
+        except Exception as e:
+            print(f"[MQTT] Message parsing failed: {e}")
+    
+    c.on_connect = on_connect
+    c.on_message = on_message
     c.connect("test.mosquitto.org", 1883, 60)
     c.loop_start()
     return c
@@ -33,13 +57,12 @@ def sync_active_user(client, user_id: str):
         st.session_state["last_synced_user_id"] = user_id
         st.session_state["last_synced_user_at"] = now
 
-# get data
+# 初始化session state
 conn = sqlite3.connect("chair.db", check_same_thread=False)
 
-TIMETHRES_SIT_SEC = 5   # backend 5s -> UI 15min
-TIMETHRES_BLC_SEC = 5   # backend 5s warning threshold
-UI_MIN_PER_SEC = 15 / TIMETHRES_SIT_SEC  # 3 min per backend second
-RESULT_FILE = Path("latest_result.json")
+TIMETHRES_SIT_SEC = 5
+TIMETHRES_BLC_SEC = 5
+UI_MIN_PER_SEC = 15 / TIMETHRES_SIT_SEC
 
 if "seattype" not in st.session_state:
     st.session_state.seattype = False
@@ -49,35 +72,23 @@ if "time_sit" not in st.session_state:
     st.session_state.time_sit = 0.0
 if "time_blc" not in st.session_state:
     st.session_state.time_blc = 0.0
-
-
-def load_latest_result(path: Path):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
-        return None
-
-    return {
-        "seattype": bool(int(data.get("seattype", 0))),
-        "blc_bad": bool(int(data.get("blc_bad", 0))),
-        "time_sit": float(data.get("time_sit", 0.0)),
-        "time_blc": float(data.get("time_blc", 0.0)),
-    }
-
-
-latest = load_latest_result(RESULT_FILE)
-if latest is not None:
-    st.session_state.seattype = latest["seattype"]
-    st.session_state.blc_bad = latest["blc_bad"]
-    st.session_state.time_sit = latest["time_sit"]
-    st.session_state.time_blc = latest["time_blc"]
+if "raw_values" not in st.session_state:
+    st.session_state.raw_values = [0, 0, 0, 0]
+if "norm_values" not in st.session_state:
+    st.session_state.norm_values = [0, 0, 0, 0]
+if "should_vibrate" not in st.session_state:
+    st.session_state.should_vibrate = False
+if "mqtt_timestamp" not in st.session_state:
+    st.session_state.mqtt_timestamp = None
 
 with st.sidebar:
-    st.header("Live Status")
+    st.header("Live Status (MQTT)")
     user_id = st.text_input("User ID", key="user_id")
-    st.write(f"source file: `{RESULT_FILE}`")
+    st.write(f"数据源: MQTT (chair/sensors)")
     st.write(f"seattype: `{st.session_state.seattype}`")
     st.write(f"blc_bad: `{st.session_state.blc_bad}`")
+    st.write(f"time_sit: `{st.session_state.time_sit}s`")
+    st.write(f"time_blc: `{st.session_state.time_blc}s`")
 
 client = get_mqtt_client()
 sync_active_user(client, user_id)
@@ -87,7 +98,7 @@ tab1, tab2 = st.tabs(["Seating Behavior Reminder", "Calibration Mode"])
 
 with tab1:
     st.title("Seating Behavior Reminder")
-    st.caption("Reading seattype / blc_bad from latest_result.json")
+    st.caption("Subscribed to (chair/sensors)")
 
     # ---- UI mapping ----
     time_sit_ui_min = st.session_state.time_sit * UI_MIN_PER_SEC
