@@ -17,7 +17,7 @@ except ImportError:
     HARDWARE_AVAILABLE = False
 
 # ============ 配置 ============
-MQTT_BROKER = "localhost"  # 修改为实际MQTT broker地址
+MQTT_BROKER = "test.mosquitto.org"  # 公共MQTT broker
 MQTT_PORT = 1883
 MQTT_PUBLISH_TOPIC = "chair/sensors"
 MQTT_SUBSCRIBE_TOPIC = "chair/user"
@@ -363,9 +363,13 @@ def main():
     # 2. 加载模型
     print("[INIT] 加载坐姿分类模型...")
     try:
-        with open(Path(__file__).parent / "model_blc.pkl", 'rb') as f:
-            state.model = pickle.load(f)
-        print("[INIT] 模型加载成功")
+        model_path = Path(__file__).parent / "model_blc.pkl"
+        if not model_path.exists():
+            print(f"[WARN] 模型文件不存在: {model_path}")
+        else:
+            with open(model_path, 'rb') as f:
+                state.model = pickle.load(f)
+            print("[INIT] 模型加载成功")
     except Exception as e:
         print(f"[WARN] 模型加载失败，使用规则推理: {e}")
     
