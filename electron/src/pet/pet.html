@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Chair Pet</title>
+  <link rel="stylesheet" href="pet.css">
+</head>
+<body>
+  <div id="petContainer" class="pet-container">
+    <!-- 顶部拖拽条 -->
+    <div class="title-bar" id="titleBar">
+      <div class="title-buttons">
+        <button class="title-btn" id="dashboardBtn" title="打开仪表板">📊</button>
+        <button class="title-btn" id="minimizeBtn" title="最小化">_</button>
+      </div>
+    </div>
+
+    <!-- 主要内容区域 -->
+    <div class="content">
+      <!-- 状态指示器 -->
+      <div class="status-bar">
+        <span id="mqttStatus" class="status-dot" title="MQTT">⚫</span>
+      </div>
+
+      <!-- 表情符号 -->
+      <div class="emoji-display" id="emojiDisplay">😀</div>
+
+      <!-- 悬停时显示的气泡 -->
+      <div class="bubble" id="bubble">
+        <div class="bubble-content">
+          ✨ Open Dashboard
+        </div>
+      </div>
+
+      <!-- 当前数据显示 -->
+      <div id="dataDisplay" class="data-display" style="font-size: 10px; margin-top: 8px; color: #999; text-align: center;">
+        waiting...
+      </div>
+    </div>
+  </div>
+
+  <script src="pet.js"></script>
+</body>
+</html>

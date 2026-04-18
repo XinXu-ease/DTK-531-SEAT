@@ -1,0 +1,184 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* Spacing System */
+:root {
+  --spacing-xs: 4px;      /* Tight grouping */
+  --spacing-sm: 8px;      /* Related elements */
+  --spacing-md: 12px;     /* Component spacing */
+  --spacing-lg: 16px;     /* Section spacing */
+  --spacing-xl: 24px;     /* Major separation */
+  --spacing-2xl: 32px;    /* Page breaks */
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  overflow: hidden;
+  background: transparent;
+}
+
+.pet-container {
+  width: 150px;
+  height: 150px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: drag;             /* ✨ 整个容器可拖拽 */
+}
+
+/* 标题栏（隐藏） */
+.title-bar {
+  display: none;                      /* 隐藏整个标题栏 */
+}
+
+.title-buttons {
+  -webkit-app-region: no-drag;
+  display: flex;
+  gap: 5px;
+}
+
+.title-btn {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: white;
+  border-radius: 3px;
+  transition: all 0.2s;
+}
+
+.title-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* 内容区域 */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-md);
+  position: relative;
+  -webkit-app-region: drag;
+}
+
+/* MQTT 状态指示器（隐藏） */
+.status-bar {
+  display: none;                      /* 完全隐藏 */
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse 1s infinite;
+}
+
+.status-dot.connected {
+  background: var(--status-success, #4CAF50);
+  color: var(--status-success, #4CAF50);
+}
+
+.status-dot.disconnected {
+  background: var(--status-error, #f44336);
+  color: var(--status-error, #f44336);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Emoji 显示 */
+.emoji-display {
+  font-size: 70px;
+  margin: 0;
+  animation: bounce-in 0.5s ease-out;
+  transform-origin: center;
+  transition: all 0.3s ease;
+  cursor: grab;
+  user-select: none;
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+
+@keyframes bounce-in {
+  0%, 100% { transform: scale(1) rotateZ(0deg); }
+  50% { transform: scale(1.1) rotateZ(5deg); }
+}
+
+.emoji-display.flip {
+  animation: flip-emoji 0.6s ease-in-out;
+}
+
+@keyframes flip-emoji {
+  0% { transform: perspective(400px) rotateY(0); opacity: 1; }
+  50% { transform: perspective(400px) rotateY(90deg); opacity: 0.5; }
+  100% { transform: perspective(400px) rotateY(0); opacity: 1; }
+}
+
+/* 数据显示（隐藏） */
+.data-display {
+  display: none;                      /* 完全隐藏 */
+}
+
+/* 气泡（Hover 时显示） */
+.bubble {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: 20px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.bubble::after {
+  content: '';
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 10px solid transparent;
+  border-right: 10px solid transparent;
+  border-top: 10px solid #667eea;
+}
+
+.bubble.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bubble-content {
+  line-height: 1.4;
+}
+
+.bubble-content p {
+  margin: 2px 0;
+}

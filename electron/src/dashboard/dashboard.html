@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chair Posture Monitor - Dashboard</title>
+    <link rel="stylesheet" href="dashboard.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <button id="closeBtn" class="close-btn" title="Close">✕</button>
+        </header>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">MQTT Connection</span>
+                <span class="status-indicator" id="mqtt-status">●</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Last Update</span>
+                <span class="status-value" id="last-update">--:--:--</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">User ID</span>
+                <span class="status-value" id="current-user-id">--</span>
+            </div>
+        </div>
+
+        <!-- User ID Input Bar -->
+        <div class="user-id-bar">
+            <div class="user-id-container">
+                <label for="global-user-id">👤 User ID:</label>
+                <input type="text" id="global-user-id" placeholder="Enter user ID (e.g. user123)" class="user-id-input" />
+                <button id="btn-sync-global-user" class="btn-sync-global">Sync</button>
+                <button id="btn-logout-user" class="btn-logout-user">Log Out</button>
+                <span id="user-sync-status" class="sync-status"></span>
+            </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <div class="tab-navigation">
+            <button class="tab-btn active" data-tab="monitoring">Seating Behavior Reminder</button>
+            <button class="tab-btn" data-tab="calibration">Calibration Mode</button>
+        </div>
+
+        <!-- ============ TAB 1: Monitoring ============ -->
+        <div id="monitoring" class="tab-content active">
+            <div class="monitoring-grid">
+                <!-- Mood Card -->
+                <div class="card mood-card">
+                    <h3>Mood</h3>
+                    <div class="mood-emoji" id="mood-emoji">😄</div>
+                    <p class="mood-text" id="mood-text">Keep up the good posture!</p>
+                </div>
+
+                <!-- State Cards -->
+                <div class="card state-card">
+                    <h3>👤 Seated State</h3>
+                    <p class="value" id="seated-state">Empty</p>
+                </div>
+
+                <div class="card state-card">
+                    <h3>⚖️ Balance</h3>
+                    <p class="value" id="balance-state">Good</p>
+                </div>
+
+                <div class="card state-card">
+                    <h3>⏱️ Sitting Time</h3>
+                    <p class="value" id="time-sit-display">0s</p>
+                </div>
+
+                <!-- Metrics -->
+                <div class="card">
+                    <h3>📈 Metrics</h3>
+                    <div class="metrics">
+                        <p>Time Seated: <span id="time-sit">0</span>s</p>
+                        <p>Bad Balance Time: <span id="time-blc">0</span>s</p>
+                    </div>
+                </div>
+
+                <!-- Pressure Bars -->
+                <div class="card">
+                    <h3>🔵 Pressure Distribution</h3>
+                    <div class="pressure-bars">
+                        <div class="pressure-bar">
+                            <label>FL</label>
+                            <div class="bar-container">
+                                <div class="bar-fill" id="pressure-fl"></div>
+                            </div>
+                        </div>
+                        <div class="pressure-bar">
+                            <label>FR</label>
+                            <div class="bar-container">
+                                <div class="bar-fill" id="pressure-fr"></div>
+                            </div>
+                        </div>
+                        <div class="pressure-bar">
+                            <label>BL</label>
+                            <div class="bar-container">
+                                <div class="bar-fill" id="pressure-bl"></div>
+                            </div>
+                        </div>
+                        <div class="pressure-bar">
+                            <label>BR</label>
+                            <div class="bar-container">
+                                <div class="bar-fill" id="pressure-br"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LLM Advice -->
+                <div class="card full-width">
+                    <h3>💡 Get Advice</h3>
+                    <button id="btn-get-advice" class="btn-get-advice">Get Advice</button>
+                    <div id="advice-display" class="advice-display" style="display: none; margin-top: 12px;">
+                        <div id="advice-content" class="advice-content"></div>
+                    </div>
+                    <div id="advice-status" class="advice-status" style="display: none; margin-top: 12px;"></div>
+                </div>
+
+                <!-- Raw Telemetry -->
+                <div class="card full-width">
+                    <h3>📋 Raw Telemetry Output</h3>
+                    <pre id="raw-data-display" class="raw-data">{}</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ TAB 2: Calibration ============ -->
+        <div id="calibration" class="tab-content">
+            <div class="calibration-container">
+                <h2>Calibration Recording Mode</h2>
+                
+                <div class="calibration-form">
+                    <!-- Duration Input -->
+                    <div class="form-group">
+                        <label for="duration-input">⏱️ Recording Duration (seconds):</label>
+                        <input type="number" id="duration-input" min="5" max="600" value="30" class="form-control" />
+                    </div>
+
+                    <!-- Record Buttons -->
+                    <div class="button-group">
+                        <button id="btn-record-0" class="btn btn-record-0">
+                            🟢 Record Balanced Status
+                        </button>
+                        <button id="btn-record-1" class="btn btn-record-1">
+                            🔴 Record Unbalanced Status
+                        </button>
+                    </div>
+
+                    <!-- Status -->
+                    <div id="calibration-status" class="calibration-status"></div>
+                </div>
+
+                <!-- Instructions -->
+                <div class="card">
+                    <h3>📖 Instructions</h3>
+                    <ol>
+                        <li>Set your User ID in the main interface</li>
+                        <li>Choose recording duration</li>
+                        <li>Click "Record Balanced Status" to record balanced sitting posture (10-30 seconds)</li>
+                        <li>Click "Record Unbalanced Status" to record unbalanced posture</li>
+                        <li>System will record all pressure data during the duration</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>

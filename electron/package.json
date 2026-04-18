@@ -1,0 +1,16 @@
+{
+  "name": "chair-desktop-pet",
+  "version": "1.0.0",
+  "description": "Smart chair desktop pet with real-time posture monitoring",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --inspect=5858"
+  },
+  "dependencies": {
+    "mqtt": "^5.3.0"
+  },
+  "devDependencies": {
+    "electron": "latest"
+  }
+}
