@@ -16,6 +16,15 @@ except ImportError:
     print("警告: adafruit_seesaw 未安装，使用模拟模式")
     HARDWARE_AVAILABLE = False
 
+# 电机驱动
+try:
+    from adafruit_crickit import crickit
+    from adafruit_motor import stepper
+    MOTOR_AVAILABLE = True
+except ImportError:
+    print("警告: adafruit_crickit 未安装，电机将使用模拟模式")
+    MOTOR_AVAILABLE = False
+
 # ============ 配置 ============
 MQTT_BROKER = "test.mosquitto.org"  # 公共MQTT broker
 MQTT_PORT = 1883
@@ -34,7 +43,7 @@ SEATTYPE_THRESHOLD = 0.2  # 判断入座的压力和阈值
 # ============ 全局状态 ============
 class SystemState:
     def __init__(self):
-        self.current_user_id = None
+        self.current_user_id = None  # 默认为空，由前端输入设置
         self.is_running = True
         self.recording = False
         self.record_label = None
@@ -57,6 +66,10 @@ class SystemState:
         
         # Seesaw硬件对象
         self.seesaw = None
+        
+        # 电机硬件对象和控制状态
+        self.motor = None
+        self.motor_running = False
 
 state = SystemState()
 
@@ -74,6 +87,20 @@ def init_seesaw():
         return True
     except Exception as e:
         print(f"Seesaw初始化失败: {e}")
+        return False
+
+def init_motor():
+    """初始化电机（使用Crickit的步进电机）"""
+    if not MOTOR_AVAILABLE:
+        print("警告: 电机硬件不可用，使用模拟模式")
+        return False
+    
+    try:
+        state.motor = crickit.stepper_motor
+        print("电机初始化成功")
+        return True
+    except Exception as e:
+        print(f"电机初始化失败: {e}")
         return False
 
 # ============ 传感器读取 ============
@@ -158,17 +185,46 @@ def detect_bad_balance(norm_values, model=None):
 def trigger_vibration_motor(should_vibrate):
     """
     控制振动电机
-    TODO: 连接实际的GPIO或PWM引脚
+    should_vibrate=True: 电机持续转动
+    should_vibrate=False: 电机停止并释放
     """
+    if state.motor is None:
+        # 模拟模式
+        if should_vibrate and not state.motor_running:
+            print("[MOTOR] 触发振动（模拟模式）")
+            state.motor_running = True
+        elif not should_vibrate and state.motor_running:
+            print("[MOTOR] 停止振动（模拟模式）")
+            state.motor_running = False
+        return
+    
     try:
-        # import RPi.GPIO as GPIO
-        # GPIO.output(VIBRATION_PIN, GPIO.HIGH if should_vibrate else GPIO.LOW)
-        if should_vibrate:
-            print("[MOTOR] 触发振动")
-        else:
-            print("[MOTOR] 停止振动")
+        if should_vibrate and not state.motor_running:
+            # 启动电机：持续转动
+            print("[MOTOR] 触发振动（实际电机）")
+            state.motor_running = True
+            # 电机持续转动，由主循环中的onestep调用触发
+        
+        elif not should_vibrate and state.motor_running:
+            # 停止电机
+            print("[MOTOR] 停止振动（实际电机）")
+            state.motor_running = False
+            state.motor.release()  # 释放电机
+    
     except Exception as e:
         print(f"电机控制失败: {e}")
+
+def motor_step():
+    """
+    每个循环周期执行一次电机步进
+    如果电机正在运行，执行一个步进
+    """
+    if state.motor_running and state.motor is not None:
+        try:
+            from adafruit_motor import stepper
+            state.motor.onestep(direction=stepper.FORWARD)
+        except Exception as e:
+            print(f"电机步进失败: {e}")
 
 # ============ 数据处理与状态更新 ============
 def update_state():
@@ -347,6 +403,8 @@ def mqtt_publish(client, payload):
     try:
         msg = json.dumps(payload)
         client.publish(MQTT_PUBLISH_TOPIC, msg, qos=1)
+        # 打印到终端
+        print(f"[MQTT] {payload}")
     except Exception as e:
         print(f"[MQTT] 发布失败: {e}")
 
@@ -360,7 +418,11 @@ def main():
     print("\n[INIT] 初始化Seesaw硬件...")
     init_seesaw()
     
-    # 2. 加载模型
+    # 2. 初始化电机
+    print("[INIT] 初始化电机...")
+    init_motor()
+    
+    # 3. 加载模型
     print("[INIT] 加载坐姿分类模型...")
     try:
         model_path = Path(__file__).parent / "model_blc.pkl"
@@ -373,7 +435,7 @@ def main():
     except Exception as e:
         print(f"[WARN] 模型加载失败，使用规则推理: {e}")
     
-    # 3. 初始化MQTT
+    # 4. 初始化MQTT
     print("[INIT] 连接MQTT Broker...")
     client = mqtt.Client(client_id="rpi-chair-monitor")
     client.on_connect = on_connect
@@ -387,12 +449,15 @@ def main():
         print(f"[ERROR] MQTT连接失败: {e}")
         return
     
-    # 4. 主循环
+    # 5. 主循环
     print("\n[MAIN] 开始主循环，采样间隔100ms...\n")
     try:
         while state.is_running:
             # 更新系统状态
             update_state()
+            
+            # 执行电机步进（如果电机正在运行）
+            motor_step()
             
             # 生成payload
             payload = get_state_payload()
@@ -422,6 +487,15 @@ def main():
         state.is_running = False
         client.loop_stop()
         client.disconnect()
+        
+        # 释放电机
+        if state.motor is not None:
+            try:
+                state.motor.release()
+                print("[MOTOR] 电机已释放")
+            except Exception as e:
+                print(f"[MOTOR] 电机释放失败: {e}")
+        
         print("[MAIN] 程序已关闭")
 
 if __name__ == "__main__":
