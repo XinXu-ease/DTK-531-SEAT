@@ -2,6 +2,9 @@ import sqlite3
 import os
 from datetime import datetime
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # LLM 
 TOKEN = os.getenv("LITELLM_TOKEN")

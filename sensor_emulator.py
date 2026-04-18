@@ -1,7 +1,10 @@
 import paho.mqtt.client as mqtt
 import json
-import time, threading
-import sys
+import time
+import board
+import busio
+from adafruit_seesaw.seesaw import Seesaw
+
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -20,47 +23,67 @@ print("Connecting to broker...")
 publisher.connect("test.mosquitto.org", 1883, 60)
 publisher.loop_start()
 
-#fake data now
-patterns = {
-    "0": [0.0, 0.0, 0.1, 0.0], #unseated
-    "1": [0.5, 0.5, 0.5, 0.5], #balanced
-    "2": [0.9, 0.1, 0.8, 0.2],#unbalanced
-} 
-current_mode = "0"
-lock = threading.Lock()
-stop_event = threading.Event()
+# FSR data
+i2c = busio.I2C(board.SCL, board.SDA)
+ss = Seesaw(i2c)
 
-def input_listener():
+#  read from 4 pin
+FSR_PINS = [2, 3, 4, 5]
+
+# initial range
+MIN_VALS = [200, 200, 200, 200]
+MAX_VALS = [900, 900, 900, 900]
+
+TOPIC = "chair/sensors"
+
+def normalize(value, min_val, max_val):
     """
-    交互输入线程：随时更新 p_cur
+    nomalize to 0~1
     """
-    global current_mode
-    print("Press 0 for Unseated, 1 for Balanced, 2 for Unbalanced, q to quit")
-    while True:
-        cmd = input("> ").strip()
-        if cmd in ("0","1", "2"):
-            with lock:
-                current_mode = cmd
-            print(f"Switched to mode {cmd}")
-        elif cmd.lower() == "q":
-            raise SystemExit
-        
-threading.Thread(target=input_listener, daemon=True).start()
-        
+    if max_val <= min_val:
+        return 0.0
+
+    x = (value - min_val) / (max_val - min_val)
+
+    if x < 0:
+        x = 0.0
+    elif x > 1:
+        x = 1.0
+
+    return round(x, 4)
+    
+def read_raw_pressures():
+    """
+    read data from 4 FSR 
+    return: [raw1, raw2, raw3, raw4]
+    """
+    return [ss.analog_read(pin) for pin in FSR_PINS]
+
+
+def get_normalized_pressures():
+    """
+      raw_values:  [r1, r2, r3, r4]
+      norm_values: [p1, p2, p3, p4]
+    """
+    raw_values = read_raw_pressures()
+    norm_values = [
+        normalize(raw_values[i], MIN_VALS[i], MAX_VALS[i])
+        for i in range(4)
+    ]
+    return raw_values, norm_values
+              
 try:
     while True:
-        with lock:
-            mode = current_mode
+        raw_values, norm_values = get_normalized_pressures()
             
-        TOPIC = "chair/sensors"
         payload = {
             "timestamp": time.time(),
-            "seattype": 1 if sum(patterns[mode]) > 0.2 else 0, 
-            "pressure": patterns[mode]
+            "seattype": 1 if sum(norm_values) > 0.2 else 0, 
+            "pressure": norm_values
         }
         
         publisher.publish(TOPIC, json.dumps(payload))
-        print(f"Mode {mode} sent: {patterns[mode]}")
+        print(f" Sent raw ={raw_values} norm ={norm_values}")
         
         time.sleep(1)
 except KeyboardInterrupt:
