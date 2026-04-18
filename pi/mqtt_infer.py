@@ -52,6 +52,7 @@ class SystemState:
         self.raw_values = [0, 0, 0, 0]
         self.norm_values = [0.0, 0.0, 0.0, 0.0]
         self.seattype = 0
+        self.seattype_changed = False  # 标记 seattype 是否改变
         self.blc_bad = 0
         self.time_sit = 0
         self.time_blc = 0
@@ -235,7 +236,11 @@ def update_state():
     3. 坐姿判断（入座、平衡度）
     4. 更新计时
     5. 决定是否振动
+    6. 检测seattype变化
     """
+    # 保存上一个状态的seattype
+    prev_seattype = state.seattype
+    
     # 1. 读取原始值
     state.raw_values = read_raw_pressures()
     
@@ -245,6 +250,9 @@ def update_state():
     # 3. 坐姿判断
     state.seattype = detect_seattype(state.norm_values)
     state.blc_bad = detect_bad_balance(state.norm_values, state.model)
+    
+    # 检测seattype是否改变
+    state.seattype_changed = (prev_seattype != state.seattype)
     
     # 4. 更新计时
     current_time = time.time()
@@ -305,9 +313,18 @@ def save_latest_result(payload):
 
 def write_to_database(payload):
     """
-    在recording状态下将数据写入SQLite
+    在以下情况下将数据写入SQLite:
+    - 处于recording状态 AND seattype状态发生变化（有人入座或离座）
+    
+    原因：
+    1. 只在seattype改变时记录可以节省内存和数据库空间
+    2. 记录每个入座/离座的时刻，以及sit_duration和blc_duration的汇总
+    3. 当recording=False时，即使seattype改变也不会记录
     """
-    if not state.recording:
+    # 条件: 处于recording状态 AND seattype状态改变
+    should_record = state.recording and state.seattype_changed
+    
+    if not should_record:
         return
     
     try:
@@ -322,6 +339,7 @@ def write_to_database(payload):
                 user_id TEXT,
                 raw_values TEXT,
                 norm_values TEXT,
+                seattype INTEGER,
                 blc_bad INTEGER,
                 record_label TEXT
             )
@@ -329,19 +347,25 @@ def write_to_database(payload):
         
         cursor.execute("""
             INSERT INTO sensor_data 
-            (timestamp, user_id, raw_values, norm_values, blc_bad, record_label)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (timestamp, user_id, raw_values, norm_values, seattype, blc_bad, record_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             payload["timestamp"],
             state.current_user_id,
             json.dumps(payload["raw_values"]),
             json.dumps(payload["norm_values"]),
+            payload["seattype"],
             payload["blc_bad"],
             state.record_label
         ))
         
         conn.commit()
         conn.close()
+        
+        # 日志输出
+        status = "seated" if state.seattype == 1 else "left"
+        print(f"[DB] Recorded: user {state.current_user_id} {status} at {datetime.now()}")
+    
     except Exception as e:
         print(f"数据库写入失败: {e}")
 

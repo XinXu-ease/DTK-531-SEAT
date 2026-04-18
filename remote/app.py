@@ -4,9 +4,23 @@ from pathlib import Path
 import paho.mqtt.client as mqtt
 import streamlit as st
 import sqlite3
+import threading
 from llm_utils import build_llm_payload, generate_llm_advice
 
 st.set_page_config(page_title="Seat Posture Simulator", page_icon=":chair:", layout="centered")
+
+# ============ 线程安全的MQTT数据缓存 ============
+mqtt_data_lock = threading.Lock()
+mqtt_data_cache = {
+    "seattype": False,
+    "blc_bad": False,
+    "time_sit": 0.0,
+    "time_blc": 0.0,
+    "raw_values": [0, 0, 0, 0],
+    "norm_values": [0, 0, 0, 0],
+    "should_vibrate": False,
+    "mqtt_timestamp": None,
+}
 
 @st.cache_resource
 def get_mqtt_client():
@@ -20,16 +34,21 @@ def get_mqtt_client():
             print(f"[MQTT] 连接失败: {rc}")
     
     def on_message(client, userdata, msg):
+        # 后台线程中只更新缓存，不修改session_state
         try:
             payload = json.loads(msg.payload.decode())
-            st.session_state.seattype = bool(payload.get("seattype", 0))
-            st.session_state.blc_bad = bool(payload.get("blc_bad", 0))
-            st.session_state.time_sit = float(payload.get("time_sit", 0))
-            st.session_state.time_blc = float(payload.get("time_blc", 0))
-            st.session_state.raw_values = payload.get("raw_values", [0,0,0,0])
-            st.session_state.norm_values = payload.get("norm_values", [0,0,0,0])
-            st.session_state.should_vibrate = bool(payload.get("should_vibrate", 0))
-            st.session_state.mqtt_timestamp = payload.get("timestamp")
+            with mqtt_data_lock:
+                mqtt_data_cache.update({
+                    "seattype": bool(payload.get("seattype", 0)),
+                    "blc_bad": bool(payload.get("blc_bad", 0)),
+                    "time_sit": float(payload.get("time_sit", 0)),
+                    "time_blc": float(payload.get("time_blc", 0)),
+                    "raw_values": payload.get("raw_values", [0,0,0,0]),
+                    "norm_values": payload.get("norm_values", [0,0,0,0]),
+                    "should_vibrate": bool(payload.get("should_vibrate", 0)),
+                    "mqtt_timestamp": payload.get("timestamp"),
+                })
+            print(f"[MQTT] 数据已更新: seattype={mqtt_data_cache['seattype']}, norm_values={mqtt_data_cache['norm_values']}")
         except Exception as e:
             print(f"[MQTT] Message parsing failed: {e}")
     
@@ -81,6 +100,22 @@ if "should_vibrate" not in st.session_state:
 if "mqtt_timestamp" not in st.session_state:
     st.session_state.mqtt_timestamp = None
 
+# ============ 从缓存同步到session_state（主线程中安全执行） ============
+with mqtt_data_lock:
+    for key, value in mqtt_data_cache.items():
+        st.session_state[key] = value
+
+# ============ 在sidebar显示实时指标（自动更新） ============
+# 这些metric会自动更新，不需要page rerun
+metric_placeholder = st.sidebar.empty()
+with metric_placeholder.container():
+    col1, col2 = st.columns(2)
+    col1.metric("seattype", "seated" if st.session_state.seattype else "empty")
+    col2.metric("blc_bad", "bad" if st.session_state.blc_bad else "good")
+    col3, col4 = st.columns(2)
+    col3.metric("time_sit", f"{st.session_state.time_sit}s")
+    col4.metric("time_blc", f"{st.session_state.time_blc}s")
+
 with st.sidebar:
     st.header("Live Status (MQTT)")
     user_id = st.text_input("User ID", key="user_id")
@@ -93,6 +128,10 @@ with st.sidebar:
 client = get_mqtt_client()
 sync_active_user(client, user_id)
 
+# ============ 使用placeholder动态更新（不需要整个页面刷新） ============
+# 这是Streamlit的标准做法，很稳定
+placeholder_metrics = st.empty()
+placeholder_data = st.empty()
 
 tab1, tab2 = st.tabs(["Seating Behavior Reminder", "Calibration Mode"])
 

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chair Posture Monitor - 椅子姿态监测系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🪑 Smart Chair Posture Monitor</h1>
+            <p>Real-time Seating & Posture Analysis System</p>
+        </header>
+
+        <!-- Status Indicator -->
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">MQTT Connection</span>
+                <span class="status-indicator" id="mqtt-status">●</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">WebSocket Connection</span>
+                <span class="status-indicator" id="ws-status">●</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Last Update</span>
+                <span class="status-value" id="last-update">--:--:--</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">User ID</span>
+                <span class="status-value" id="current-user-id">--</span>
+            </div>
+        </div>
+
+        <!-- User ID Input Bar -->
+        <div class="user-id-bar">
+            <div class="user-id-container">
+                <label for="global-user-id">👤 User ID:</label>
+                <input type="text" id="global-user-id" placeholder="Enter user ID (e.g. user123)" class="user-id-input" />
+                <button id="btn-sync-global-user" class="btn-sync-global">Sync</button>
+                <span id="user-sync-status" class="sync-status"></span>
+            </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <div class="tab-navigation">
+            <button class="tab-btn active" data-tab="monitoring">Seating Behavior Reminder</button>
+            <button class="tab-btn" data-tab="calibration">Calibration Mode</button>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tab 1: Monitoring -->
+            <div class="tab-content active" id="monitoring-tab">
+                <div class="monitoring-layout">
+                    <!-- Left Panel: Status Overview -->
+                    <section class="panel left-panel">
+                        <h2>Status Overview</h2>
+                        
+                        <!-- Mood Indicator (Emoji based on sit time) -->
+                        <div class="mood-card">
+                            <div class="mood-emoji" id="mood-emoji">😄</div>
+                            <div class="mood-info">
+                                <div class="mood-label">Posture Mood</div>
+                                <div class="mood-status" id="mood-status">Keep it up!</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Seating State -->
+                        <div class="state-card seated-state">
+                            <div class="state-icon" id="seated-icon">🪑</div>
+                            <div class="state-info">
+                                <div class="state-label">Seating State</div>
+                                <div class="state-value" id="seated-text">Empty</div>
+                            </div>
+                        </div>
+
+                        <!-- Balance State -->
+                        <div class="state-card balance-state">
+                            <div class="state-icon" id="balance-icon">⚖️</div>
+                            <div class="state-info">
+                                <div class="state-label">Posture Balance</div>
+                                <div class="state-value" id="balance-text">Unknown</div>
+                            </div>
+                        </div>
+
+                        <!-- Vibration Alert -->
+                        <div class="state-card vibration-state" id="vibration-card">
+                            <div class="state-icon pulse" id="vibration-icon">📳</div>
+                            <div class="state-info">
+                                <div class="state-label">Vibration Alert</div>
+                                <div class="state-value" id="vibration-text">Inactive</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Right Panel: Metrics & Details -->
+                    <section class="panel right-panel">
+                        <h2>Metrics & Analytics</h2>
+                        
+                        <!-- Time Metrics -->
+                        <div class="metrics-grid">
+                            <div class="metric-card">
+                                <div class="metric-label">⏱️ Time Seated</div>
+                                <div class="metric-value" id="time-sit">0.0s</div>
+                                <div class="metric-mini" id="time-sit-min">0 min</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">⚠️ Bad Balance Time</div>
+                                <div class="metric-value" id="time-blc">0.0s</div>
+                                <div class="metric-mini" id="time-blc-min">0 min</div>
+                            </div>
+                        </div>
+
+                        <!-- Pressure Sensor Data -->
+                        <div class="sensor-section">
+                            <h3>Pressure Sensor Data</h3>
+                            <div class="sensor-bars">
+                                <div class="sensor-bar">
+                                    <div class="bar-label">FL</div>
+                                    <div class="bar-container">
+                                        <div class="bar-fill" id="sensor-0" style="height: 0%"></div>
+                                    </div>
+                                    <div class="bar-value" id="sensor-0-val">0.00</div>
+                                </div>
+                                <div class="sensor-bar">
+                                    <div class="bar-label">FR</div>
+                                    <div class="bar-container">
+                                        <div class="bar-fill" id="sensor-1" style="height: 0%"></div>
+                                    </div>
+                                    <div class="bar-value" id="sensor-1-val">0.00</div>
+                                </div>
+                                <div class="sensor-bar">
+                                    <div class="bar-label">BL</div>
+                                    <div class="bar-container">
+                                        <div class="bar-fill" id="sensor-2" style="height: 0%"></div>
+                                    </div>
+                                    <div class="bar-value" id="sensor-2-val">0.00</div>
+                                </div>
+                                <div class="sensor-bar">
+                                    <div class="bar-label">BR</div>
+                                    <div class="bar-container">
+                                        <div class="bar-fill" id="sensor-3" style="height: 0%"></div>
+                                    </div>
+                                    <div class="bar-value" id="sensor-3-val">0.00</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Raw Data JSON -->
+                        <div class="data-section">
+                            <h3>Raw Telemetry</h3>
+                            <pre id="raw-data" class="json-display">{}</pre>
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- Tab 2: Calibration -->
+            <div class="tab-content" id="calibration-tab">
+                <div class="calibration-panel">
+                    <h2>Calibration Mode</h2>
+                    <p class="info-text">Record sensor data with specific labels for model training</p>
+                    
+                    <!-- User ID Input -->
+                    <div class="form-group">
+                        <label for="user-id-input">User ID:</label>
+                        <input type="text" id="user-id-input" placeholder="Enter user ID" value="">
+                        <button class="btn-sync" id="btn-sync-user">Sync User ID</button>
+                    </div>
+
+                    <!-- Calibration Duration -->
+                    <div class="form-group">
+                        <label for="calib-duration">Duration (seconds):</label>
+                        <input type="number" id="calib-duration" min="1" max="60" value="10">
+                    </div>
+
+                    <!-- Calibration Buttons -->
+                    <div class="button-group">
+                        <button class="btn-calib btn-balanced" id="btn-record-balanced">
+                            Record Label 0<br><span class="btn-subtitle">(Balanced Posture)</span>
+                        </button>
+                        <button class="btn-calib btn-unbalanced" id="btn-record-unbalanced">
+                            Record Label 1<br><span class="btn-subtitle">(Unbalanced Posture)</span>
+                        </button>
+                    </div>
+
+                    <!-- Status Message -->
+                    <div class="calib-status">
+                        <div id="calib-message" class="status-message">Ready for calibration</div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Connected to MQTT Broker: test.mosquitto.org • Topic: chair/sensors</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
