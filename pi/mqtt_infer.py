@@ -510,7 +510,7 @@ def main():
                 print("[REC] 记录时间已到，自动停止")
             
             # 采样间隔
-            time.sleep(0.1)
+            time.sleep(0.5)
     
     except KeyboardInterrupt:
         print("\n[MAIN] 收到中断信号")
