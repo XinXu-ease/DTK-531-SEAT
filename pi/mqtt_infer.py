@@ -99,7 +99,10 @@ def init_motor():
     
     try:
         state.motor = crickit.stepper_motor
-        print("电机初始化成功")
+        # 初始化后立即释放，确保电机处于停止状态
+        state.motor.release()
+        state.motor_running = False
+        print("电机初始化成功（已释放）")
         return True
     except Exception as e:
         print(f"电机初始化失败: {e}")
