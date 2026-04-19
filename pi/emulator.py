@@ -11,10 +11,14 @@ def on_connect(client, userdata, flags, rc):
         print(f"Connection failed with code {rc}")
 
 # ============ 数据库写入函数 ============
-def write_to_database(payload):
+def write_to_database(payload, should_record):
     """
-    将数据写入SQLite数据库
+    在以下情况下将数据写入SQLite:
+    - 处于recording状态 AND seattype状态发生变化（有人入座或离座）
     """
+    if not should_record:
+        return
+    
     try:
         conn = sqlite3.connect("chair.db")
         cursor = conn.cursor()
@@ -42,13 +46,17 @@ def write_to_database(payload):
             json.dumps(payload["raw_values"]),
             json.dumps(payload["norm_values"]),
             payload["blc_bad"],
-            payload.get("record_label")  # 外部设置的标签
+            payload.get("record_label")
         ))
         
         conn.commit()
         conn.close()
+        
+        # 日志输出
+        status = "seated" if payload["seattype"] == 1 else "left seat"
+        print(f"[DB] Recorded: user {payload.get('user_id')} {status} | blc_bad={payload['blc_bad']}")
     except Exception as e:
-        print(f"[DB] Error writing to database: {e}")
+        print(f"[DB] Error: {e}")
 
 # ============ MQTT 客户端设置 ============
 # 创建publisher和subscriber client
@@ -58,24 +66,28 @@ subscriber = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "emulator_sub")
 publisher.on_connect = on_connect
 subscriber.on_connect = on_connect
 
-# 全局变量：存储前端发送的calibration信息
+# 全局变量：存储前端发送的命令
 calibration_state = {
     "user_id": None,
+    "recording": False,
     "record_label": None,
     "lock": threading.Lock()
 }
 
 def on_message_user(client, userdata, msg):
-    """订阅chair/user主题，接收前端的calibration命令"""
+    """订阅chair/user主题，接收前端的user_id和recording状态"""
     try:
         payload = json.loads(msg.payload.decode())
         with calibration_state["lock"]:
             if "user_id" in payload:
                 calibration_state["user_id"] = payload["user_id"]
-                print(f"[MQTT] Received user_id: {payload['user_id']}")
+                print(f"[MQTT] user_id: {payload['user_id']}")
+            if "recording" in payload:
+                calibration_state["recording"] = payload["recording"]
+                print(f"[MQTT] recording: {payload['recording']}")
             if "label" in payload:
                 calibration_state["record_label"] = payload["label"]
-                print(f"[MQTT] Received record_label: {payload['label']}")
+                print(f"[MQTT] record_label: {payload['label']}")
     except Exception as e:
         print(f"[MQTT] Error parsing message: {e}")
 
@@ -126,6 +138,7 @@ stop_event = threading.Event()
 # 时间计数
 st_time = None  # 坐下开始时间
 blc_time = None  # 不良坐姿开始时间
+prev_seattype = 0  # 上一个seattype状态
 
 def input_listener():
     """
@@ -182,6 +195,10 @@ try:
         seattype = detect_seattype(norm_values)
         blc_bad = detect_bad_balance(norm_values)
         
+        # 检测seattype是否改变
+        seattype_changed = (prev_seattype != seattype)
+        prev_seattype = seattype
+        
         # 计时
         current_time = time.time()
         time_sit = int(current_time - sit_start) if sit_start is not None else 0
@@ -190,9 +207,10 @@ try:
         # 决定是否应该振动
         should_vibrate = (blc_bad == 1 and time_blc > BAD_POSTURE_THRESHOLD)
         
-        # 获取前端设置的user_id和record_label
+        # 获取前端设置的user_id和recording状态
         with calibration_state["lock"]:
             user_id = calibration_state["user_id"]
+            recording = calibration_state["recording"]
             record_label = calibration_state["record_label"]
         
         # 构建payload（与mqtt_infer一致）
@@ -200,23 +218,24 @@ try:
             "timestamp": current_time,
             "user_id": user_id,
             "is_running": True,
-            "raw_values": [int(v * 1000) for v in norm_values],  # 模拟raw值
+            "raw_values": [int(v * 1000) for v in norm_values],
             "norm_values": norm_values,
             "seattype": seattype,
             "blc_bad": blc_bad,
             "time_sit": time_sit,
             "time_blc": time_blc,
             "should_vibrate": should_vibrate,
-            "record_label": record_label  # 添加record_label
+            "record_label": record_label
         }
         
         # 发布到MQTT
         publisher.publish("chair/sensors", json.dumps(payload), qos=1)
         
-        # 写入数据库
-        write_to_database(payload)
+        # 只在seattype改变 AND recording=True时写入数据库
+        should_record = recording and seattype_changed
+        write_to_database(payload, should_record)
         
-        print(f"[MODE {mode}] seattype={seattype} blc_bad={blc_bad} time_sit={time_sit} time_blc={time_blc} vibrate={should_vibrate}")
+        print(f"[{mode}] seattype={seattype} blc_bad={blc_bad} rec={recording} changed={seattype_changed}")
         
         time.sleep(1)
 except KeyboardInterrupt:

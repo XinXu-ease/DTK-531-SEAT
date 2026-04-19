@@ -58,8 +58,9 @@ class SystemState:
         self.time_blc = 0
         self.should_vibrate = False
         
-        self.last_sit_time = None
+        self.last_sit_start = None  # 记录入座开始的时间戳
         self.last_blc_time = None
+        self.sit_duration = 0  # 本次坐着的时间（秒）
         self.model = None
         
         self.db_path = Path(__file__).parent / "chair.db"
@@ -257,15 +258,22 @@ def update_state():
     # 4. 更新计时
     current_time = time.time()
     
-    # 坐姿计时
+    # 坐姿计时：当离座时（seattype 从 1 变为 0）计算本次坐着的时间
     if state.seattype == 1:  # 入座
-        if state.last_sit_time is None:
-            state.last_sit_time = current_time
-        else:
-            state.time_sit = int(current_time - state.last_sit_time)
+        if state.last_sit_start is None:
+            # 开始坐着
+            state.last_sit_start = current_time
+        state.time_sit = int(current_time - state.last_sit_start)
+        state.sit_duration = 0  # 重置离座时的 duration
     else:  # 未入座
-        state.last_sit_time = None
-        state.time_sit = 0
+        if state.last_sit_start is not None and state.seattype_changed:
+            # 刚离座，计算本次坐着的总时间
+            state.sit_duration = int(current_time - state.last_sit_start)
+            state.time_sit = state.sit_duration
+            print(f"[LOG] Seat duration: {state.sit_duration}s")
+        else:
+            state.sit_duration = 0
+        state.last_sit_start = None
     
     # 不良坐姿计时
     if state.blc_bad == 1:  # 不平衡
@@ -298,7 +306,8 @@ def get_state_payload():
         "blc_bad": state.blc_bad,
         "time_sit": state.time_sit,
         "time_blc": state.time_blc,
-        "should_vibrate": state.should_vibrate
+        "should_vibrate": state.should_vibrate,
+        "sit_duration": state.sit_duration  # 本次坐着的时间（秒）
     }
 
 def save_latest_result(payload):
@@ -318,13 +327,16 @@ def write_to_database(payload):
     
     原因：
     1. 只在seattype改变时记录可以节省内存和数据库空间
-    2. 记录每个入座/离座的时刻，以及sit_duration和blc_duration的汇总
+    2. 记录每个入座/离座的时刻
     3. 当recording=False时，即使seattype改变也不会记录
     """
     # 条件: 处于recording状态 AND seattype状态改变
     should_record = state.recording and state.seattype_changed
     
     if not should_record:
+        # 仅在状态改变时才记录调试日志
+        if state.seattype_changed:
+            print(f"[DB] Skip: seattype changed but recording={state.recording}")
         return
     
     try:
@@ -340,6 +352,7 @@ def write_to_database(payload):
                 raw_values TEXT,
                 norm_values TEXT,
                 seattype INTEGER,
+                sit_duration REAL,
                 blc_bad INTEGER,
                 record_label TEXT
             )
@@ -347,14 +360,15 @@ def write_to_database(payload):
         
         cursor.execute("""
             INSERT INTO sensor_data 
-            (timestamp, user_id, raw_values, norm_values, seattype, blc_bad, record_label)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (timestamp, user_id, raw_values, norm_values, seattype, sit_duration, blc_bad, record_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             payload["timestamp"],
             state.current_user_id,
             json.dumps(payload["raw_values"]),
             json.dumps(payload["norm_values"]),
             payload["seattype"],
+            payload["sit_duration"],
             payload["blc_bad"],
             state.record_label
         ))
@@ -363,11 +377,12 @@ def write_to_database(payload):
         conn.close()
         
         # 日志输出
-        status = "seated" if state.seattype == 1 else "left"
-        print(f"[DB] Recorded: user {state.current_user_id} {status} at {datetime.now()}")
+        status = "📍 seated" if payload["seattype"] == 1 else "🚶 left seat"
+        duration_str = f"duration={payload['sit_duration']}s" if payload["seattype"] == 0 else ""
+        print(f"[DB] Recorded: user {state.current_user_id} {status} {duration_str} | blc_bad={payload['blc_bad']}")
     
     except Exception as e:
-        print(f"数据库写入失败: {e}")
+        print(f"[DB] Error: {e}")
 
 # ============ MQTT处理 ============
 def on_connect(client, userdata, flags, rc):

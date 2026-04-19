@@ -5,7 +5,7 @@ import paho.mqtt.client as mqtt
 import streamlit as st
 import sqlite3
 import threading
-from llm_utils import build_llm_payload, generate_llm_advice
+from electron.llm_utils import build_llm_payload, generate_llm_advice
 
 st.set_page_config(page_title="Seat Posture Simulator", page_icon=":chair:", layout="centered")
 
