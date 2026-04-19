@@ -70,7 +70,12 @@ def main():
     
     try:
         # Connect to SQLite database
+        # Try local path first (if running on same machine as Pi)
         db_path = Path(__file__).parent.parent / "pi" / "chair.db"
+        
+        # If not found, try the Pi's actual path on Linux
+        if not db_path.exists():
+            db_path = Path("/home/dti/Desktop/DTK-531-SEAT/pi/chair.db")
         
         # Try to get advice from available data
         payload = get_advice_from_available_data(db_path, user_id)
