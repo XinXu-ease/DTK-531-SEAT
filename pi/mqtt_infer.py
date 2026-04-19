@@ -286,8 +286,8 @@ def update_state():
         state.time_blc = 0
     
     # 5. 决定是否振动
-    # 条件: 处于不良坐姿且持续时间超过阈值
-    state.should_vibrate = (state.blc_bad == 1 and state.time_blc > BAD_POSTURE_THRESHOLD)
+    # 条件: 只有在入座(seattype=1) 且 处于不良坐姿(blc_bad=1) 且 持续时间超过阈值(5s) 才震动
+    state.should_vibrate = (state.seattype == 1 and state.blc_bad == 1 and state.time_blc > BAD_POSTURE_THRESHOLD)
     
     # 直接控制电机（本地闭环，不依赖MQTT）
     trigger_vibration_motor(state.should_vibrate)
