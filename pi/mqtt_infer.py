@@ -11,7 +11,7 @@ try:
     import board
     import busio
     from adafruit_seesaw.seesaw import Seesaw
-    HARDWARE_AVAILABLE = True
+    HARDWARE_AVAILABLE = False  # 强制禁用，硬件无法通讯
 except ImportError:
     print("警告: adafruit_seesaw 未安装，使用模拟模式")
     HARDWARE_AVAILABLE = False
@@ -20,7 +20,7 @@ except ImportError:
 try:
     from adafruit_crickit import crickit
     from adafruit_motor import stepper
-    MOTOR_AVAILABLE = True
+    MOTOR_AVAILABLE = False  # 强制禁用，Seesaw 无法初始化
 except ImportError:
     print("警告: adafruit_crickit 未安装，电机将使用模拟模式")
     MOTOR_AVAILABLE = False
@@ -107,6 +107,16 @@ def init_motor():
     except Exception as e:
         print(f"电机初始化失败: {e}")
         return False
+
+def force_stop_motor():
+    """强制停止电机，用于启动时和异常处理"""
+    if state.motor is not None:
+        try:
+            state.motor.release()
+            state.motor_running = False
+            print("[MOTOR] 电机已强制释放")
+        except Exception as e:
+            print(f"[MOTOR] 强制释放失败: {e}")
 
 # ============ 传感器读取 ============
 def read_raw_pressures():
@@ -457,6 +467,7 @@ def main():
     # 2. 初始化电机
     print("[INIT] 初始化电机...")
     init_motor()
+    force_stop_motor()  # 初始化后立即强制停止电机
     
     # 3. 加载模型
     print("[INIT] 加载坐姿分类模型...")

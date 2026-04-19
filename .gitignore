@@ -2,3 +2,31 @@
 node_modules/
 electron/node_modules/
 .agents
+
+# 数据库和数据集
+*.db
+*.sqlite
+*.sqlite3
+pi/chair.db
+pi/latest_result.json
+
+# 数据文件
+*.csv
+*.json
+data/
+datasets/
+__pycache__/
+*.pyc
+
+# 模型文件
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# 系统文件
+.DS_Store
+*.log
+.vscode/
+.idea/
