@@ -30,8 +30,8 @@ def query_pi_database(user_id):
         # SQLite query to run on Pi
         sql_query = f"""SELECT 
   COUNT(*) as record_count,
+  COALESCE(SUM(sit_duration), 0) as sit_duration_sec,
   SUM(CASE WHEN blc_bad = 1 THEN 1 ELSE 0 END) as blc_count,
-  CAST(COUNT(*) * 0.1 AS REAL) as sit_duration_sec,
   CAST(SUM(CASE WHEN blc_bad = 1 THEN 1 ELSE 0 END) * 0.1 AS REAL) as blc_duration_sec
 FROM sensor_data
 WHERE user_id = '{user_id}' AND DATE(datetime(timestamp, 'unixepoch')) = '{today}'
@@ -64,8 +64,8 @@ WHERE user_id = '{user_id}' AND DATE(datetime(timestamp, 'unixepoch')) = '{today
             return None
         
         record_count = int(parts[0])
-        blc_count = int(float(parts[1])) if parts[1] else 0
-        sit_time = float(parts[2]) if parts[2] else 0
+        sit_time = float(parts[1]) if parts[1] else 0
+        blc_count = int(float(parts[2])) if parts[2] else 0
         blc_time = float(parts[3]) if parts[3] else 0
         
         if record_count == 0:
