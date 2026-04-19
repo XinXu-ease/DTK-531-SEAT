@@ -168,11 +168,8 @@ def detect_bad_balance(norm_values, model=None):
         return 0
     
     if model is not None:
-        # TODO: 使用model_blc.pkl进行推理
         try:
-            # 示例: prediction = model.predict([norm_values])[0]
-            # return int(prediction)
-            pass
+            return int(model.predict([norm_values])[0])
         except Exception as e:
             print(f"模型推理失败: {e}")
     
@@ -323,20 +320,17 @@ def save_latest_result(payload):
 def write_to_database(payload):
     """
     在以下情况下将数据写入SQLite:
-    - 处于recording状态 AND seattype状态发生变化（有人入座或离座）
+    - user_id 已设置 (不等于 None) AND seattype状态发生变化（入座或离座）
     
     原因：
-    1. 只在seattype改变时记录可以节省内存和数据库空间
-    2. 记录每个入座/离座的时刻
-    3. 当recording=False时，即使seattype改变也不会记录
+    1. 只要设置了 user_id，就自动开始记录该用户的坐姿数据
+    2. 无需额外的 recording 标志
+    3. record_label 仍可选，用于标记特殊的训练数据
     """
-    # 条件: 处于recording状态 AND seattype状态改变
-    should_record = state.recording and state.seattype_changed
+    # 条件: user_id 已设置 AND seattype 状态改变
+    should_record = state.current_user_id is not None and state.seattype_changed
     
     if not should_record:
-        # 仅在状态改变时才记录调试日志
-        if state.seattype_changed:
-            print(f"[DB] Skip: seattype changed but recording={state.recording}")
         return
     
     try:
