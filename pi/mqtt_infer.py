@@ -331,6 +331,20 @@ def save_latest_result(payload):
     except Exception as e:
         print(f"JSON保存失败: {e}")
 
+def load_user_id_from_db():
+    """启动时从数据库读取最后一条记录的user_id来恢复会话"""
+    try:
+        conn = sqlite3.connect(state.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM sensor_data ORDER BY timestamp DESC LIMIT 1")
+        result = cursor.fetchone()
+        conn.close()
+        if result and result[0]:
+            return result[0]
+    except Exception as e:
+        print(f"[DB] 读取user_id失败: {e}")
+    return None
+
 def write_to_database(payload):
     """
     在以下情况下将数据写入SQLite:
@@ -482,6 +496,14 @@ def main():
             print("[INIT] 模型加载成功")
     except Exception as e:
         print(f"[WARN] 模型加载失败，使用规则推理: {e}")
+    
+    # 3.5 从数据库恢复user_id（会话持久化）
+    print("[INIT] 恢复会话user_id...")
+    state.current_user_id = load_user_id_from_db()
+    if state.current_user_id:
+        print(f"[STATE] 从数据库恢复user_id: {state.current_user_id}")
+    else:
+        print(f"[STATE] 未找到保存的user_id，等待前端设置")
     
     # 4. 初始化MQTT
     print("[INIT] 连接MQTT Broker...")

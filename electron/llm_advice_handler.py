@@ -21,24 +21,39 @@ PI_DB_PATH = "/home/dti/Desktop/DTK-531-SEAT/pi/chair.db"
 
 def query_pi_database(user_id):
     """
-    Query chair.db on Pi via SSH and get today's data for user.
+    Query chair.db on Pi via SSH and get recent data for user (past 24 hours).
     Returns dict with metrics or None if no data.
     """
     try:
-        today = datetime.now().date().isoformat()
+        # 获取Pi当前时间戳，用于计算24小时前的时间
+        time_result = subprocess.run(
+            ["ssh", f"{PI_USER}@{PI_HOST}", "date +%s"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
         
-        # SQLite query to run on Pi
+        if time_result.returncode != 0:
+            print(f"[DEBUG] Failed to get Pi timestamp: {time_result.stderr}", file=sys.stderr)
+            return None
+        
+        pi_now = float(time_result.stdout.strip())
+        pi_24h_ago = pi_now - 86400  # 24小时前
+        
+        print(f"[DEBUG] Pi now: {pi_now}, 24h ago: {pi_24h_ago}", file=sys.stderr)
+        
+        # SQLite query to run on Pi（查询过去24小时的数据）
         sql_query = f"""SELECT 
   COUNT(*) as record_count,
   COALESCE(SUM(sit_duration), 0) as sit_duration_sec,
   SUM(CASE WHEN blc_bad = 1 THEN 1 ELSE 0 END) as blc_count,
   CAST(SUM(CASE WHEN blc_bad = 1 THEN 1 ELSE 0 END) * 0.1 AS REAL) as blc_duration_sec
 FROM sensor_data
-WHERE user_id = '{user_id}' AND DATE(datetime(timestamp, 'unixepoch')) = '{today}'
+WHERE user_id = '{user_id}' AND timestamp >= {pi_24h_ago}
 """
         
         # Run SQLite query remotely via SSH
-        print(f"[DEBUG] Querying Pi database via SSH...", file=sys.stderr)
+        print(f"[DEBUG] Querying Pi database for last 24 hours...", file=sys.stderr)
         
         result = subprocess.run(
             ["ssh", f"{PI_USER}@{PI_HOST}", "sqlite3", PI_DB_PATH],
@@ -69,7 +84,7 @@ WHERE user_id = '{user_id}' AND DATE(datetime(timestamp, 'unixepoch')) = '{today
         blc_time = float(parts[3]) if parts[3] else 0
         
         if record_count == 0:
-            print(f"[DEBUG] No records for user {user_id} today", file=sys.stderr)
+            print(f"[DEBUG] No records for user {user_id} in last 24 hours", file=sys.stderr)
             return None
         
         return {
