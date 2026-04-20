@@ -11,7 +11,7 @@ try:
     import board
     import busio
     from adafruit_seesaw.seesaw import Seesaw
-    HARDWARE_AVAILABLE = False  # 强制禁用，硬件无法通讯
+    HARDWARE_AVAILABLE = True
 except ImportError:
     print("警告: adafruit_seesaw 未安装，使用模拟模式")
     HARDWARE_AVAILABLE = False
@@ -20,7 +20,7 @@ except ImportError:
 try:
     from adafruit_crickit import crickit
     from adafruit_motor import stepper
-    MOTOR_AVAILABLE = False  # 强制禁用，Seesaw 无法初始化
+    MOTOR_AVAILABLE = True
 except ImportError:
     print("警告: adafruit_crickit 未安装，电机将使用模拟模式")
     MOTOR_AVAILABLE = False
@@ -279,10 +279,11 @@ def update_state():
         if state.last_sit_start is not None and state.seattype_changed:
             # 刚离座，计算本次坐着的总时间
             state.sit_duration = int(current_time - state.last_sit_start)
-            state.time_sit = state.sit_duration
+            state.time_sit = 0
             print(f"[LOG] Seat duration: {state.sit_duration}s")
         else:
             state.sit_duration = 0
+            state.time_sit = 0
         state.last_sit_start = None
     
     # 不良坐姿计时

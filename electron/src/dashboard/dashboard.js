@@ -170,8 +170,8 @@ function updateMQTTStatus(connected) {
 
 // 获取 Emoji
 function getEmojiByTimeSit(timeSit) {
-  if (timeSit === 0) return '😴';
-  if (timeSit < 5) return '😄';
+  if (timeSit === 0) return '�';
+  if (timeSit < 5) return '😊';
   if (timeSit < 15) return '😐';
   return '😭';
 }
