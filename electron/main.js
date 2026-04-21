@@ -2,9 +2,96 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const os = require('os');
+const mqtt = require('mqtt');
 
 let petWindow;
 let dashboardWindow;
+let mqttClient;
+let latestMqttData = {
+  sensors: null,
+  user: null
+};
+
+// 初始化 MQTT 连接（连接到树莓派本地 broker）
+function initMQTT() {
+  console.log('[Electron] Connecting to MQTT broker at 172.28.54.209:1883...');
+  
+  mqttClient = mqtt.connect('mqtt://172.28.54.209:1883', {
+    clientId: 'electron-chair-' + Date.now(),
+    reconnectPeriod: 3000,
+    connectTimeout: 10000
+  });
+
+  mqttClient.on('connect', () => {
+    console.log('[Electron] MQTT Connected');
+    mqttClient.subscribe('chair/sensors', { qos: 1 });
+    mqttClient.subscribe('chair/user', { qos: 1 });
+    
+    // 通知所有窗口 MQTT 已连接
+    if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.webContents.send('mqtt-status', { connected: true });
+    }
+    if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+      dashboardWindow.webContents.send('mqtt-status', { connected: true });
+    }
+  });
+
+  mqttClient.on('message', (topic, message) => {
+    try {
+      const payload = JSON.parse(message.toString());
+      
+      if (topic === 'chair/sensors') {
+        latestMqttData.sensors = payload;
+        // 实时推送给前端
+        if (petWindow && !petWindow.isDestroyed()) {
+          petWindow.webContents.send('mqtt-data', { topic, payload });
+        }
+        if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+          dashboardWindow.webContents.send('mqtt-data', { topic, payload });
+        }
+      } else if (topic === 'chair/user') {
+        latestMqttData.user = payload;
+        if (petWindow && !petWindow.isDestroyed()) {
+          petWindow.webContents.send('mqtt-data', { topic, payload });
+        }
+        if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+          dashboardWindow.webContents.send('mqtt-data', { topic, payload });
+        }
+      }
+    } catch (err) {
+      console.error('[Electron] MQTT message parse error:', err);
+    }
+  });
+
+  mqttClient.on('error', (error) => {
+    console.error('[Electron] MQTT Error:', error);
+    if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.webContents.send('mqtt-status', { connected: false });
+    }
+    if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+      dashboardWindow.webContents.send('mqtt-status', { connected: false });
+    }
+  });
+
+  mqttClient.on('disconnect', () => {
+    console.log('[Electron] MQTT Disconnected');
+    if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.webContents.send('mqtt-status', { connected: false });
+    }
+    if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+      dashboardWindow.webContents.send('mqtt-status', { connected: false });
+    }
+  });
+}
+
+// 发布消息到 MQTT
+ipcMain.handle('mqtt-publish', async (event, topic, payload) => {
+  if (mqttClient) {
+    mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 });
+    return { success: true };
+  }
+  return { success: false, error: 'MQTT not connected' };
+});
 
 // 创建桌宠浮窗
 function createPetWindow() {
@@ -65,6 +152,7 @@ function createDashboardWindow() {
 // 应用启动
 app.on('ready', () => {
   createPetWindow();
+  initMQTT();  // 初始化 MQTT 连接
 });
 
 // 来自 pet.js 的 IPC 事件：打开仪表板

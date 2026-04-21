@@ -26,8 +26,8 @@ except ImportError:
     MOTOR_AVAILABLE = False
 
 # ============ 配置 ============
-MQTT_BROKER = "test.mosquitto.org"  # 公共MQTT broker
-MQTT_PORT = 1883
+MQTT_BROKER = "localhost"  # 本地 MQTT broker
+MQTT_PORT = 1883  # 标准 MQTT 端口
 MQTT_PUBLISH_TOPIC = "chair/sensors"
 MQTT_SUBSCRIBE_TOPIC = "chair/user"
 
@@ -512,6 +512,7 @@ def main():
     client.on_message = on_message
     
     try:
+        # 标准 MQTT 端口无需 TLS
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         client.loop_start()
         print(f"[MQTT] 连接到 {MQTT_BROKER}:{MQTT_PORT}")

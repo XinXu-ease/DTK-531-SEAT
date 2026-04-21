@@ -10,7 +10,6 @@ let currentState = {
   lastUpdateTime: null
 };
 
-let mqttClient = null;
 let updateInterval = null;
 
 // 初始化
@@ -23,6 +22,9 @@ window.addEventListener('DOMContentLoaded', () => {
     currentState.userID = savedUserID;
     updateBubbleDisplay();
   }
+
+  // 初始化表情
+  updateEmoji();
 
   // 事件监听
   document.getElementById('dashboardBtn').addEventListener('click', openDashboard);
@@ -47,73 +49,29 @@ window.addEventListener('DOMContentLoaded', () => {
   // 只有点击气泡才打开 dashboard
   document.getElementById('bubble').addEventListener('click', openDashboard);
 
-  // 连接 MQTT
-  connectMQTT();
-
-  // 定期检查超时
-  setInterval(checkTimeout, 1000);
-});
-
-// MQTT 连接
-function connectMQTT() {
-  // 使用 WebSocket 连接到 MQTT broker（test.mosquitto.org 支持 WebSocket）
-  const brokerURL = 'wss://test.mosquitto.org:8081';
-
-  // 动态加载 MQTT.js 库
-  if (typeof mqtt === 'undefined') {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/mqtt@5.3.0/dist/mqtt.min.js';
-    script.onload = () => {
-      doConnectMQTT(brokerURL);
-    };
-    document.head.appendChild(script);
-  } else {
-    doConnectMQTT(brokerURL);
-  }
-}
-
-function doConnectMQTT(brokerURL) {
-  mqttClient = mqtt.connect(brokerURL, {
-    reconnectPeriod: 1000,
-    connectTimeout: 10000,
-    clientId: 'chair_pet_' + Date.now()
-  });
-
-  mqttClient.on('connect', () => {
-    console.log('[Pet] MQTT Connected');
-    currentState.mqttConnected = true;
-    updateMQTTStatus(true);
-
-    // 订阅传感器数据主题
-    mqttClient.subscribe('chair/sensors', { qos: 1 });
-    // 订阅用户主题
-    mqttClient.subscribe('chair/user', { qos: 1 });
-  });
-
-  mqttClient.on('disconnect', () => {
-    console.log('[Pet] MQTT Disconnected');
-    currentState.mqttConnected = false;
-    updateMQTTStatus(false);
-  });
-
-  mqttClient.on('message', (topic, message) => {
+  // 监听来自主进程的 MQTT 数据
+  window.electronAPI.onMQTTData((event, { topic, payload }) => {
     try {
-      const payload = JSON.parse(message.toString());
-      
       if (topic === 'chair/sensors') {
         handleSensorData(payload);
       } else if (topic === 'chair/user') {
         handleUserData(payload);
       }
     } catch (e) {
-      console.error('[Pet] Failed to parse message:', e);
+      console.error('[Pet] Error handling MQTT data:', e);
     }
   });
 
-  mqttClient.on('error', (error) => {
-    console.error('[Pet] MQTT Error:', error);
+  // 监听 MQTT 连接状态
+  window.electronAPI.onMQTTStatus((event, { connected }) => {
+    console.log('[Pet] MQTT Status:', connected ? 'Connected' : 'Disconnected');
+    currentState.mqttConnected = connected;
+    updateMQTTStatus(connected);
   });
-}
+
+  // 定期检查超时
+  setInterval(checkTimeout, 1000);
+});
 
 // 处理传感器数据
 function handleSensorData(payload) {

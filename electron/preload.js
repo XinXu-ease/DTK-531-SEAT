@@ -10,6 +10,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 获取 LLM 建议
   getLLMAdvice: (userID) => ipcRenderer.invoke('get-llm-advice', userID),
   
+  // MQTT 相关
+  onMQTTData: (callback) => ipcRenderer.on('mqtt-data', callback),
+  onMQTTStatus: (callback) => ipcRenderer.on('mqtt-status', callback),
+  publishMQTT: (topic, payload) => ipcRenderer.invoke('mqtt-publish', topic, payload),
+  
   // 监听来自主进程的消息
   onPetShownInTaskbar: (callback) => ipcRenderer.on('pet-shown-in-taskbar', callback),
   onDashboardClosed: (callback) => ipcRenderer.on('dashboard-closed', callback)

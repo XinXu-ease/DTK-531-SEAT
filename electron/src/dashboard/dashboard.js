@@ -11,8 +11,6 @@ let currentState = {
   lastUpdateTime: null
 };
 
-let mqttClient = null;
-
 // 初始化
 window.addEventListener('DOMContentLoaded', () => {
   console.log('[Dashboard] Initializing...');
@@ -22,6 +20,9 @@ window.addEventListener('DOMContentLoaded', () => {
   currentState.userID = savedUserID;
   document.getElementById('global-user-id').value = savedUserID;
   updateStatusDisplay();
+
+  // 初始化心情卡片
+  updateMoodCard();
 
   // 事件监听
   document.getElementById('closeBtn').addEventListener('click', closeApp);
@@ -45,70 +46,29 @@ window.addEventListener('DOMContentLoaded', () => {
   // Get Advice 按钮
   document.getElementById('btn-get-advice').addEventListener('click', getAdviceFromLLM);
 
-  // 连接 MQTT
-  connectMQTT();
-
-  // 定期检查超时
-  setInterval(checkTimeout, 1000);
-});
-
-// MQTT 连接
-function connectMQTT() {
-  const brokerURL = 'wss://test.mosquitto.org:8081';
-
-  if (typeof mqtt === 'undefined') {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/mqtt@5.3.0/dist/mqtt.min.js';
-    script.onload = () => {
-      doConnectMQTT(brokerURL);
-    };
-    document.head.appendChild(script);
-  } else {
-    doConnectMQTT(brokerURL);
-  }
-}
-
-function doConnectMQTT(brokerURL) {
-  mqttClient = mqtt.connect(brokerURL, {
-    reconnectPeriod: 1000,
-    connectTimeout: 10000,
-    clientId: 'chair_dashboard_' + Date.now()
-  });
-
-  mqttClient.on('connect', () => {
-    console.log('[Dashboard] MQTT Connected');
-    currentState.mqttConnected = true;
-    updateMQTTStatus(true);
-
-    // 订阅主题
-    mqttClient.subscribe('chair/sensors', { qos: 1 });
-    mqttClient.subscribe('chair/user', { qos: 1 });
-  });
-
-  mqttClient.on('disconnect', () => {
-    console.log('[Dashboard] MQTT Disconnected');
-    currentState.mqttConnected = false;
-    updateMQTTStatus(false);
-  });
-
-  mqttClient.on('message', (topic, message) => {
+  // 监听来自主进程的 MQTT 数据
+  window.electronAPI.onMQTTData((event, { topic, payload }) => {
     try {
-      const payload = JSON.parse(message.toString());
-
       if (topic === 'chair/sensors') {
         handleSensorData(payload);
       } else if (topic === 'chair/user') {
         handleUserData(payload);
       }
     } catch (e) {
-      console.error('[Dashboard] Failed to parse message:', e);
+      console.error('[Dashboard] Error handling MQTT data:', e);
     }
   });
 
-  mqttClient.on('error', (error) => {
-    console.error('[Dashboard] MQTT Error:', error);
+  // 监听 MQTT 连接状态
+  window.electronAPI.onMQTTStatus((event, { connected }) => {
+    console.log('[Dashboard] MQTT Status:', connected ? 'Connected' : 'Disconnected');
+    currentState.mqttConnected = connected;
+    updateMQTTStatus(connected);
   });
-}
+
+  // 定期检查超时
+  setInterval(checkTimeout, 1000);
+});
 
 // 处理传感器数据
 function handleSensorData(payload) {
@@ -170,8 +130,8 @@ function updateMQTTStatus(connected) {
 
 // 获取 Emoji
 function getEmojiByTimeSit(timeSit) {
-  if (timeSit === 0) return '�';
-  if (timeSit < 5) return '😊';
+  if (timeSit === 0) return '😴';
+  if (timeSit < 5) return '😄';
   if (timeSit < 15) return '😐';
   return '😭';
 }
@@ -270,11 +230,15 @@ function syncGlobalUserID() {
   localStorage.setItem('userID', userID);
 
   // 发布到 MQTT：同时开启 recording 模式
-  if (mqttClient && currentState.mqttConnected) {
-    mqttClient.publish('chair/user', JSON.stringify({ 
+  if (currentState.mqttConnected) {
+    window.electronAPI.publishMQTT('chair/user', { 
       user_id: userID,
       recording: true
-    }), { qos: 1 });
+    }).then(() => {
+      console.log('[Dashboard] User ID synced to MQTT');
+    }).catch(err => {
+      console.error('[Dashboard] Failed to publish user ID:', err);
+    });
   }
 
   updateStatusDisplay();
@@ -296,11 +260,15 @@ function logout() {
   document.getElementById('global-user-id').value = '';
 
   // 发布到 MQTT：关闭 recording 模式
-  if (mqttClient && currentState.mqttConnected) {
-    mqttClient.publish('chair/user', JSON.stringify({ 
+  if (currentState.mqttConnected) {
+    window.electronAPI.publishMQTT('chair/user', { 
       user_id: null,
       recording: false
-    }), { qos: 1 });
+    }).then(() => {
+      console.log('[Dashboard] User logged out in MQTT');
+    }).catch(err => {
+      console.error('[Dashboard] Failed to publish logout:', err);
+    });
   }
 
   updateStatusDisplay();
@@ -331,7 +299,7 @@ function startRecording(label) {
     return;
   }
 
-  if (!mqttClient || !currentState.mqttConnected) {
+  if (!currentState.mqttConnected) {
     showCalibrationStatus('MQTT not connected', 'error');
     return;
   }
@@ -344,20 +312,24 @@ function startRecording(label) {
     duration: duration
   };
 
-  mqttClient.publish('chair/user', JSON.stringify(command), { qos: 1 });
+  window.electronAPI.publishMQTT('chair/user', command).then(() => {
+    const labelName = label === '0' ? 'Balanced' : 'Unbalanced';
+    showCalibrationStatus(`Started recording ${labelName} for ${duration}s...`, 'success');
 
-  const labelName = label === '0' ? 'Balanced' : 'Unbalanced';
-  showCalibrationStatus(`Started recording ${labelName} for ${duration}s...`, 'success');
-
-  // 自动停止（持续时间后）
-  setTimeout(() => {
-    const stopCommand = {
-      user_id: userID,
-      recording: false
-    };
-    mqttClient.publish('chair/user', JSON.stringify(stopCommand), { qos: 1 });
-    showCalibrationStatus(`✓ Recording completed for ${labelName}`, 'success');
-  }, duration * 1000);
+    // 自动停止（持续时间后）
+    setTimeout(() => {
+      const stopCommand = {
+        user_id: userID,
+        recording: false
+      };
+      window.electronAPI.publishMQTT('chair/user', stopCommand).then(() => {
+        showCalibrationStatus(`✓ Recording completed for ${labelName}`, 'success');
+      });
+    }, duration * 1000);
+  }).catch(err => {
+    console.error('[Dashboard] Failed to start recording:', err);
+    showCalibrationStatus('Failed to start recording', 'error');
+  });
 }
 
 // 显示校准状态
