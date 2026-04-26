@@ -1,283 +1,295 @@
-import json
+﻿import json
 import time
 import pickle
 import sqlite3
-from datetime import datetime
 from pathlib import Path
+
 import paho.mqtt.client as mqtt
 
-# ============ 硬件依赖 ============
+# ============ Hardware Dependencies ============
 try:
     import board
     import busio
     from adafruit_seesaw.seesaw import Seesaw
+
     HARDWARE_AVAILABLE = True
 except ImportError:
-    print("警告: adafruit_seesaw 未安装，使用模拟模式")
+    print("[WARN] adafruit_seesaw not installed, using simulation mode")
     HARDWARE_AVAILABLE = False
 
-# 电机驱动
+# Stepper motor driver
 try:
     from adafruit_crickit import crickit
     from adafruit_motor import stepper
+
     MOTOR_AVAILABLE = True
 except ImportError:
-    print("警告: adafruit_crickit 未安装，电机将使用模拟模式")
+    print("[WARN] adafruit_crickit not installed, motor will run in simulation mode")
     MOTOR_AVAILABLE = False
 
-# ============ 配置 ============
-MQTT_BROKER = "localhost"  # 本地 MQTT broker
-MQTT_PORT = 1883  # 标准 MQTT 端口
+# ============ Configuration ============
+MQTT_BROKER = "localhost"  # Local MQTT broker
+MQTT_PORT = 1883  # Standard MQTT port
 MQTT_PUBLISH_TOPIC = "chair/sensors"
 MQTT_SUBSCRIBE_TOPIC = "chair/user"
 
-# FSR Seesaw配置
-FSR_PINS = [2, 3, 4, 5]  # Seesaw引脚编号
-MIN_VALS = [200, 200, 200, 200]  # 原始值下限
-MAX_VALS = [900, 900, 900, 900]  # 原始值上限
+# FSR/Seesaw settings
+FSR_PINS = [2, 3, 4, 5]  # Seesaw pin numbers
+MIN_VALS = [200, 200, 200, 200]  # Raw lower bounds
+MAX_VALS = [900, 900, 900, 900]  # Raw upper bounds
 
-# 逻辑阈值
-BAD_POSTURE_THRESHOLD = 5  # 秒数，坐姿不良持续时间超过此值触发振动
-SEATTYPE_THRESHOLD = 0.2  # 判断入座的压力和阈值
+# Decision thresholds
+BAD_POSTURE_THRESHOLD = 5  # Seconds before vibration triggers
+SEATTYPE_THRESHOLD = 0.2  # Sum(norm_values) threshold for seated state
 
-# ============ 全局状态 ============
+
+# ============ Runtime State ============
 class SystemState:
     def __init__(self):
-        self.current_user_id = None  # 默认为空，由前端输入设置
+        self.current_user_id = None  # Set by frontend command
         self.is_running = True
         self.recording = False
         self.record_label = None
         self.record_end_ts = None
-        
+
         self.raw_values = [0, 0, 0, 0]
         self.norm_values = [0.0, 0.0, 0.0, 0.0]
         self.seattype = 0
-        self.seattype_changed = False  # 标记 seattype 是否改变
+        self.seattype_changed = False  # Whether seattype changed this cycle
         self.blc_bad = 0
         self.time_sit = 0
         self.time_blc = 0
         self.should_vibrate = False
-        
-        self.last_sit_start = None  # 记录入座开始的时间戳
+
+        self.last_sit_start = None  # Timestamp when user sat down
         self.last_blc_time = None
-        self.sit_duration = 0  # 本次坐着的时间（秒）
+        self.sit_duration = 0  # Latest completed sit duration (seconds)
         self.model = None
-        
+
         self.db_path = Path(__file__).parent / "chair.db"
         self.json_path = Path(__file__).parent / "latest_result.json"
-        
-        # Seesaw硬件对象
+
+        # Hardware objects
         self.seesaw = None
-        
-        # 电机硬件对象和控制状态
         self.motor = None
         self.motor_running = False
 
+
 state = SystemState()
 
-# ============ 硬件初始化 ============
+
+# ============ Hardware Initialization ============
 def init_seesaw():
-    """初始化Seesaw I2C设备"""
+    """Initialize Seesaw over I2C."""
     if not HARDWARE_AVAILABLE:
-        print("硬件模式不可用，使用模拟数据")
+        print("[INFO] Seesaw unavailable, running sensor simulation")
         return False
-    
+
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
         state.seesaw = Seesaw(i2c)
-        print("Seesaw初始化成功")
+        print("[INIT] Seesaw initialized")
         return True
     except Exception as e:
-        print(f"Seesaw初始化失败: {e}")
+        print(f"[ERROR] Failed to initialize Seesaw: {e}")
         return False
+
 
 def init_motor():
-    """初始化电机（使用Crickit的步进电机）"""
+    """Initialize stepper motor via Crickit."""
     if not MOTOR_AVAILABLE:
-        print("警告: 电机硬件不可用，使用模拟模式")
-        return False
-    
-    try:
-        state.motor = crickit.stepper_motor
-        # 初始化后立即释放，确保电机处于停止状态
-        state.motor.release()
-        state.motor_running = False
-        print("电机初始化成功（已释放）")
-        return True
-    except Exception as e:
-        print(f"电机初始化失败: {e}")
+        print("[WARN] Motor driver unavailable, using motor simulation")
         return False
 
+    try:
+        state.motor = crickit.stepper_motor
+        # Release immediately to ensure a safe stopped state.
+        state.motor.release()
+        state.motor_running = False
+        print("[INIT] Motor initialized and released")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize motor: {e}")
+        return False
+
+
 def force_stop_motor():
-    """强制停止电机，用于启动时和异常处理"""
+    """Force stop and release motor, if initialized."""
     if state.motor is not None:
         try:
             state.motor.release()
             state.motor_running = False
-            print("[MOTOR] 电机已强制释放")
+            print("[MOTOR] Force stopped")
         except Exception as e:
-            print(f"[MOTOR] 强制释放失败: {e}")
+            print(f"[MOTOR] Failed to force stop motor: {e}")
 
-# ============ 传感器读取 ============
+
+# ============ Sensor Reading ============
 def read_raw_pressures():
     """
-    从Seesaw读取4个FSR原始值
-    return: [raw1, raw2, raw3, raw4]
+    Read 4 FSR raw values.
+    Returns: [raw1, raw2, raw3, raw4]
+
+    In simulation mode, values alternate every 10 seconds
+    between "seated-like" and "empty-seat-like" ranges.
     """
     if state.seesaw is None:
-        # 模拟模式：返回随机数据用于测试
         import random
-        return [random.randint(200, 800) for _ in range(4)]
-    
+        import time as time_module
+
+        current_time = time_module.time()
+        cycle_position = int(current_time) % 20  # 20-second cycle
+
+        if cycle_position < 10:
+            # First 10s: higher pressure (simulate seated)
+            return [random.randint(500, 800) for _ in range(4)]
+        # Last 10s: lower pressure (simulate empty seat)
+        return [random.randint(50, 150) for _ in range(4)]
+
     try:
         return [state.seesaw.analog_read(pin) for pin in FSR_PINS]
     except Exception as e:
-        print(f"FSR读取失败: {e}")
+        print(f"[ERROR] Failed to read FSR values: {e}")
         return [0, 0, 0, 0]
 
+
 def normalize(value, min_val, max_val):
-    """
-    将单个原始值归一化到 [0, 1]
-    """
+    """Normalize a raw value to [0, 1]."""
     if max_val <= min_val:
         return 0.0
-    
+
     x = (value - min_val) / (max_val - min_val)
-    
+
     if x < 0:
         x = 0.0
     elif x > 1:
         x = 1.0
-    
+
     return round(x, 4)
+
 
 def get_normalized_pressures(raw_values):
     """
-    将原始值数组归一化
+    Convert raw values into normalized pressure values.
     raw_values: [r1, r2, r3, r4]
     return: [p1, p2, p3, p4]
     """
-    norm_values = [
-        normalize(raw_values[i], MIN_VALS[i], MAX_VALS[i])
-        for i in range(4)
-    ]
-    return norm_values
+    return [normalize(raw_values[i], MIN_VALS[i], MAX_VALS[i]) for i in range(4)]
 
-# ============ 坐姿判断 ============
+
+# ============ Posture Inference ============
 def detect_seattype(norm_values):
     """
-    判断是否入座
-    规则: 4个传感器压力值的和 > SEATTYPE_THRESHOLD 则判定为入座
+    Infer seated state.
+    Rule: sum(norm_values) > SEATTYPE_THRESHOLD => seated (1), otherwise 0.
     """
     pressure_sum = sum(norm_values)
     return 1 if pressure_sum > SEATTYPE_THRESHOLD else 0
 
+
 def detect_bad_balance(norm_values, model=None):
     """
-    判断坐姿是否不平衡
-    如果有模型则使用模型推理，否则使用方差规则
+    Infer whether posture is unbalanced.
+    Uses model prediction when available; otherwise falls back to variance rule.
     """
     if not norm_values or all(v == 0 for v in norm_values):
         return 0
-    
+
     if model is not None:
         try:
             return int(model.predict([norm_values])[0])
         except Exception as e:
-            print(f"模型推理失败: {e}")
-    
-    # 回退到方差规则：计算压力值分布的方差
+            print(f"[WARN] Model prediction failed, using variance fallback: {e}")
+
+    # Variance fallback: high variance means uneven pressure distribution.
     mean_val = sum(norm_values) / len(norm_values)
     variance = sum((v - mean_val) ** 2 for v in norm_values) / len(norm_values)
-    
-    # 方差过大则认为坐姿不平衡（压力分布不均）
     return 1 if variance > 0.05 else 0
 
-# ============ 电机控制 ============
+
+# ============ Motor Control ============
 def trigger_vibration_motor(should_vibrate):
     """
-    控制振动电机
-    should_vibrate=True: 电机持续转动
-    should_vibrate=False: 电机停止并释放
+    Start or stop motor based on target state.
+    should_vibrate=True: start vibration
+    should_vibrate=False: stop and release
     """
     if state.motor is None:
-        # 模拟模式
+        # Simulation mode logging only.
         if should_vibrate and not state.motor_running:
-            print("[MOTOR] 触发振动（模拟模式）")
+            print("[MOTOR] Simulated vibration started")
             state.motor_running = True
         elif not should_vibrate and state.motor_running:
-            print("[MOTOR] 停止振动（模拟模式）")
+            print("[MOTOR] Simulated vibration stopped")
             state.motor_running = False
         return
-    
+
     try:
         if should_vibrate and not state.motor_running:
-            # 启动电机：持续转动
-            print("[MOTOR] 触发振动（实际电机）")
+            print("[MOTOR] Vibration started")
             state.motor_running = True
-            # 电机持续转动，由主循环中的onestep调用触发
-        
+            # Continuous stepping is driven by motor_step() in main loop.
         elif not should_vibrate and state.motor_running:
-            # 停止电机
-            print("[MOTOR] 停止振动（实际电机）")
+            print("[MOTOR] Vibration stopped")
             state.motor_running = False
-            state.motor.release()  # 释放电机
-    
+            state.motor.release()  # Release motor immediately
     except Exception as e:
-        print(f"电机控制失败: {e}")
+        print(f"[ERROR] Motor control failed: {e}")
+
 
 def motor_step():
     """
-    每个循环周期执行一次电机步进
-    如果电机正在运行，执行一个步进
+    Perform one motor step when motor is running.
+    Call this repeatedly in the main loop for continuous vibration.
     """
     if state.motor_running and state.motor is not None:
         try:
-            from adafruit_motor import stepper
             state.motor.onestep(direction=stepper.FORWARD)
         except Exception as e:
-            print(f"电机步进失败: {e}")
+            print(f"[ERROR] Motor step failed: {e}")
 
-# ============ 数据处理与状态更新 ============
+
+# ============ State Update and Processing ============
 def update_state():
     """
-    主处理循环：
-    1. 读取FSR原始值
-    2. 归一化处理
-    3. 坐姿判断（入座、平衡度）
-    4. 更新计时
-    5. 决定是否振动
-    6. 检测seattype变化
+    Main state update pipeline:
+    1) Read sensors
+    2) Normalize pressures
+    3) Infer seated state and balance
+    4) Update timers
+    5) Evaluate vibration condition
+    6) Apply motor control
     """
-    # 保存上一个状态的seattype
+    # Save previous seated state for edge detection.
     prev_seattype = state.seattype
-    
-    # 1. 读取原始值
+
+    # 1) Read raw values
     state.raw_values = read_raw_pressures()
-    
-    # 2. 归一化
+
+    # 2) Normalize
     state.norm_values = get_normalized_pressures(state.raw_values)
-    
-    # 3. 坐姿判断
+
+    # 3) Inference
     state.seattype = detect_seattype(state.norm_values)
     state.blc_bad = detect_bad_balance(state.norm_values, state.model)
-    
-    # 检测seattype是否改变
-    state.seattype_changed = (prev_seattype != state.seattype)
-    
-    # 4. 更新计时
+
+    # Detect seated-state transition.
+    state.seattype_changed = prev_seattype != state.seattype
+
+    if state.seattype_changed:
+        print(f"[SEATTYPE] Changed: {prev_seattype} -> {state.seattype}, user_id={state.current_user_id}")
+
+    # 4) Update timers
     current_time = time.time()
-    
-    # 坐姿计时：当离座时（seattype 从 1 变为 0）计算本次坐着的时间
-    if state.seattype == 1:  # 入座
+
+    # Sitting timer and completed sit duration.
+    if state.seattype == 1:  # seated
         if state.last_sit_start is None:
-            # 开始坐着
             state.last_sit_start = current_time
         state.time_sit = int(current_time - state.last_sit_start)
-        state.sit_duration = 0  # 重置离座时的 duration
-    else:  # 未入座
+        state.sit_duration = 0  # reset completed duration while seated
+    else:  # not seated
         if state.last_sit_start is not None and state.seattype_changed:
-            # 刚离座，计算本次坐着的总时间
             state.sit_duration = int(current_time - state.last_sit_start)
             state.time_sit = 0
             print(f"[LOG] Seat duration: {state.sit_duration}s")
@@ -285,28 +297,31 @@ def update_state():
             state.sit_duration = 0
             state.time_sit = 0
         state.last_sit_start = None
-    
-    # 不良坐姿计时
-    if state.blc_bad == 1:  # 不平衡
+
+    # Bad-balance timer
+    if state.blc_bad == 1:  # unbalanced
         if state.last_blc_time is None:
             state.last_blc_time = current_time
         else:
             state.time_blc = int(current_time - state.last_blc_time)
-    else:  # 平衡
+    else:  # balanced
         state.last_blc_time = None
         state.time_blc = 0
-    
-    # 5. 决定是否振动
-    # 条件: 只有在入座(seattype=1) 且 处于不良坐姿(blc_bad=1) 且 持续时间超过阈值(5s) 才震动
-    state.should_vibrate = (state.seattype == 1 and state.blc_bad == 1 and state.time_blc > BAD_POSTURE_THRESHOLD)
-    
-    # 直接控制电机（本地闭环，不依赖MQTT）
+
+    # 5) Vibration condition
+    # Condition: seated + unbalanced + duration over threshold
+    state.should_vibrate = (
+        state.seattype == 1
+        and state.blc_bad == 1
+        and state.time_blc > BAD_POSTURE_THRESHOLD
+    )
+
+    # 6) Local closed-loop motor control (not MQTT-dependent)
     trigger_vibration_motor(state.should_vibrate)
 
+
 def get_state_payload():
-    """
-    生成当前状态payload用于MQTT发布和JSON缓存
-    """
+    """Build MQTT payload from current state."""
     return {
         "timestamp": time.time(),
         "user_id": state.current_user_id,
@@ -318,21 +333,21 @@ def get_state_payload():
         "time_sit": state.time_sit,
         "time_blc": state.time_blc,
         "should_vibrate": state.should_vibrate,
-        "sit_duration": state.sit_duration  # 本次坐着的时间（秒）
+        "sit_duration": state.sit_duration,  # last completed sit duration
     }
 
+
 def save_latest_result(payload):
-    """
-    保存最新状态到JSON缓存（用于调试和fallback）
-    """
+    """Save latest payload as JSON cache for debugging/fallback."""
     try:
-        with open(state.json_path, 'w') as f:
+        with open(state.json_path, "w") as f:
             json.dump(payload, f, indent=2)
     except Exception as e:
-        print(f"JSON保存失败: {e}")
+        print(f"[ERROR] Failed to save JSON cache: {e}")
+
 
 def load_user_id_from_db():
-    """启动时从数据库读取最后一条记录的user_id来恢复会话"""
+    """Restore last known user_id from database (most recent row)."""
     try:
         conn = sqlite3.connect(state.db_path)
         cursor = conn.cursor()
@@ -342,31 +357,37 @@ def load_user_id_from_db():
         if result and result[0]:
             return result[0]
     except Exception as e:
-        print(f"[DB] 读取user_id失败: {e}")
+        print(f"[DB] Failed to load user_id: {e}")
     return None
+
 
 def write_to_database(payload):
     """
-    在以下情况下将数据写入SQLite:
-    - user_id 已设置 (不等于 None) AND seattype状态发生变化（入座或离座）
-    
-    原因：
-    1. 只要设置了 user_id，就自动开始记录该用户的坐姿数据
-    2. 无需额外的 recording 标志
-    3. record_label 仍可选，用于标记特殊的训练数据
+    Write transition rows to SQLite.
+
+    Current write rule:
+    - user_id is set, and
+    - seattype changed in this cycle.
     """
-    # 条件: user_id 已设置 AND seattype 状态改变
     should_record = state.current_user_id is not None and state.seattype_changed
-    
+
+    print(
+        "[DB] Record check: "
+        f"user_id={state.current_user_id}, "
+        f"seattype_changed={state.seattype_changed}, "
+        f"should_record={should_record}"
+    )
+
     if not should_record:
         return
-    
+
     try:
         conn = sqlite3.connect(state.db_path)
         cursor = conn.cursor()
-        
-        # 创建表（如果不存在）
-        cursor.execute("""
+
+        # Create table if needed.
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS sensor_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL,
@@ -378,48 +399,54 @@ def write_to_database(payload):
                 blc_bad INTEGER,
                 record_label TEXT
             )
-        """)
-        
-        cursor.execute("""
-            INSERT INTO sensor_data 
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO sensor_data
             (timestamp, user_id, raw_values, norm_values, seattype, sit_duration, blc_bad, record_label)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            payload["timestamp"],
-            state.current_user_id,
-            json.dumps(payload["raw_values"]),
-            json.dumps(payload["norm_values"]),
-            payload["seattype"],
-            payload["sit_duration"],
-            payload["blc_bad"],
-            state.record_label
-        ))
-        
+            """,
+            (
+                payload["timestamp"],
+                state.current_user_id,
+                json.dumps(payload["raw_values"]),
+                json.dumps(payload["norm_values"]),
+                payload["seattype"],
+                payload["sit_duration"],
+                payload["blc_bad"],
+                state.record_label,
+            ),
+        )
+
         conn.commit()
         conn.close()
-        
-        # 日志输出
-        status = "📍 seated" if payload["seattype"] == 1 else "🚶 left seat"
+
+        status = "seated" if payload["seattype"] == 1 else "left seat"
         duration_str = f"duration={payload['sit_duration']}s" if payload["seattype"] == 0 else ""
         print(f"[DB] Recorded: user {state.current_user_id} {status} {duration_str} | blc_bad={payload['blc_bad']}")
-    
+
     except Exception as e:
         print(f"[DB] Error: {e}")
 
-# ============ MQTT处理 ============
+
+# ============ MQTT Handlers ============
 def on_connect(client, userdata, flags, rc):
-    """MQTT连接回调"""
+    """MQTT connection callback."""
     if rc == 0:
-        print("MQTT连接成功")
+        print("[MQTT] Connected")
         client.subscribe(MQTT_SUBSCRIBE_TOPIC)
-        print(f"已订阅topic: {MQTT_SUBSCRIBE_TOPIC}")
+        print(f"[MQTT] Subscribed to topic: {MQTT_SUBSCRIBE_TOPIC}")
     else:
-        print(f"MQTT连接失败，错误码: {rc}")
+        print(f"[MQTT] Connection failed with code: {rc}")
+
 
 def on_message(client, userdata, msg):
     """
-    处理来自远端的控制命令
-    期望payload格式：
+    Handle incoming messages from `chair/user`.
+
+    Expected payload shape example:
     {
         "user_id": "xin",
         "recording": true,
@@ -430,144 +457,146 @@ def on_message(client, userdata, msg):
     """
     try:
         payload = json.loads(msg.payload.decode())
-        print(f"[MQTT] 收到命令: {payload}")
-        
-        # 设置用户ID
+        print(f"[MQTT] Received command: {payload}")
+
+        # Update user_id
         if "user_id" in payload:
             state.current_user_id = payload["user_id"]
-            print(f"[STATE] user_id设置为: {state.current_user_id}")
-        
-        # 设置recording状态
+            print(f"[STATE] user_id set to: {state.current_user_id}")
+
+        # Update recording state
         if "recording" in payload:
             state.recording = payload["recording"]
             state.record_label = payload.get("label", None)
             if state.recording:
                 duration = payload.get("duration", 60)
                 state.record_end_ts = time.time() + duration
-                print(f"[REC] 开始记录，标签: {state.record_label}，持续时间: {duration}s")
+                print(f"[REC] Recording started: label={state.record_label}, duration={duration}s")
             else:
-                print(f"[REC] 停止记录")
-        
-        # 处理校准命令
+                print("[REC] Recording stopped")
+
+        # Calibration command (placeholder)
         if "calibrate" in payload:
             calib_type = payload["calibrate"]
-            print(f"[CALIB] 校准命令: {calib_type}")
-            # TODO: 实现校准逻辑
-    
+            print(f"[CALIB] Calibration command received: {calib_type}")
+            # TODO: implement calibration logic
+
     except json.JSONDecodeError:
-        print(f"[ERROR] MQTT消息解析失败")
+        print("[ERROR] Failed to parse MQTT payload as JSON")
     except Exception as e:
-        print(f"[ERROR] MQTT消息处理异常: {e}")
+        print(f"[ERROR] Failed to handle MQTT message: {e}")
+
 
 def mqtt_publish(client, payload):
-    """发布状态payload到MQTT"""
+    """Publish payload to MQTT topic."""
     try:
         msg = json.dumps(payload)
         client.publish(MQTT_PUBLISH_TOPIC, msg, qos=1)
-        # 打印到终端
-        print(f"[MQTT] {payload}")
+        print(f"[MQTT] Published: {payload}")
     except Exception as e:
-        print(f"[MQTT] 发布失败: {e}")
+        print(f"[MQTT] Publish failed: {e}")
 
-# ============ 主循环 ============
+
+# ============ Main Loop ============
 def main():
     print("=" * 50)
-    print("DTK-531 智能坐姿检测系统 - Pi边缘服务")
+    print("DTK-531 Smart Posture System - Pi Runtime")
     print("=" * 50)
-    
-    # 1. 初始化硬件
-    print("\n[INIT] 初始化Seesaw硬件...")
+
+    # 1) Initialize sensor hardware
+    print("\n[INIT] Initializing Seesaw...")
     init_seesaw()
-    
-    # 2. 初始化电机
-    print("[INIT] 初始化电机...")
+
+    # 2) Initialize motor
+    print("[INIT] Initializing motor...")
     init_motor()
-    force_stop_motor()  # 初始化后立即强制停止电机
-    
-    # 3. 加载模型
-    print("[INIT] 加载坐姿分类模型...")
+    force_stop_motor()  # Safety stop right after initialization
+
+    # 3) Load posture model
+    print("[INIT] Loading balance model...")
     try:
         model_path = Path(__file__).parent / "model_blc.pkl"
         if not model_path.exists():
-            print(f"[WARN] 模型文件不存在: {model_path}")
+            print(f"[WARN] Model file not found: {model_path}")
         else:
-            with open(model_path, 'rb') as f:
+            with open(model_path, "rb") as f:
                 state.model = pickle.load(f)
-            print("[INIT] 模型加载成功")
+            print("[INIT] Model loaded")
     except Exception as e:
-        print(f"[WARN] 模型加载失败，使用规则推理: {e}")
-    
-    # 3.5 从数据库恢复user_id（会话持久化）
-    print("[INIT] 恢复会话user_id...")
+        print(f"[WARN] Failed to load model, using fallback rule: {e}")
+
+    # 3.5) Restore user_id from DB (session persistence)
+    print("[INIT] Restoring user_id from DB...")
     state.current_user_id = load_user_id_from_db()
     if state.current_user_id:
-        print(f"[STATE] 从数据库恢复user_id: {state.current_user_id}")
+        print(f"[STATE] Restored user_id: {state.current_user_id}")
     else:
-        print(f"[STATE] 未找到保存的user_id，等待前端设置")
-    
-    # 4. 初始化MQTT
-    print("[INIT] 连接MQTT Broker...")
+        print("[STATE] No previous user_id found; waiting for dashboard sync")
+
+    # 4) Initialize MQTT
+    print("[INIT] Connecting to MQTT broker...")
     client = mqtt.Client(client_id="rpi-chair-monitor")
     client.on_connect = on_connect
     client.on_message = on_message
-    
+
     try:
-        # 标准 MQTT 端口无需 TLS
+        # Standard MQTT port, no TLS
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         client.loop_start()
-        print(f"[MQTT] 连接到 {MQTT_BROKER}:{MQTT_PORT}")
+        print(f"[MQTT] Connected to {MQTT_BROKER}:{MQTT_PORT}")
     except Exception as e:
-        print(f"[ERROR] MQTT连接失败: {e}")
+        print(f"[ERROR] MQTT connection failed: {e}")
         return
-    
-    # 5. 主循环
-    print("\n[MAIN] 开始主循环，采样间隔100ms...\n")
+
+    # 5) Main loop
+    print("\n[MAIN] Running at 1 Hz...\n")
     try:
         while state.is_running:
-            # 更新系统状态
+            # Update system state
             update_state()
-            
-            # 执行电机步进（如果电机正在运行）
+
+            # Perform one motor step if motor is running
             motor_step()
-            
-            # 生成payload
+
+            # Build payload
             payload = get_state_payload()
-            
-            # 发布到MQTT
+
+            # Publish to MQTT
             mqtt_publish(client, payload)
-            
-            # 保存到JSON缓存
+
+            # Save JSON cache
             save_latest_result(payload)
-            
-            # 如果处于recording状态，写入数据库
+
+            # Write DB row when transition conditions are met
             write_to_database(payload)
-            
-            # 检查recording是否应停止
+
+            # Auto-stop recording when timer expires
             if state.recording and state.record_end_ts and time.time() > state.record_end_ts:
                 state.recording = False
-                print("[REC] 记录时间已到，自动停止")
-            
-            # 采样间隔
+                print("[REC] Recording window completed")
+
+            # Sampling interval
             time.sleep(1.0)
-    
+
     except KeyboardInterrupt:
-        print("\n[MAIN] 收到中断信号")
+        print("\n[MAIN] Interrupted by user")
     except Exception as e:
-        print(f"\n[ERROR] 主循环异常: {e}")
+        print(f"\n[ERROR] Main loop crashed: {e}")
     finally:
         state.is_running = False
         client.loop_stop()
         client.disconnect()
-        
-        # 释放电机
+
+        # Release motor
         if state.motor is not None:
             try:
                 state.motor.release()
-                print("[MOTOR] 电机已释放")
+                print("[MOTOR] Released")
             except Exception as e:
-                print(f"[MOTOR] 电机释放失败: {e}")
-        
-        print("[MAIN] 程序已关闭")
+                print(f"[MOTOR] Failed to release motor: {e}")
+
+        print("[MAIN] Shutdown complete")
+
 
 if __name__ == "__main__":
     main()
