@@ -41,6 +41,7 @@ MAX_VALS = [900, 900, 900, 900]  # Raw upper bounds
 # Decision thresholds
 BAD_POSTURE_THRESHOLD = 5  # Seconds before vibration triggers
 SEATTYPE_THRESHOLD = 0.2  # Sum(norm_values) threshold for seated state
+DEFAULT_BLC_PROBA_THRESHOLD = 0.5  # Probability threshold for blc_bad=1
 
 
 # ============ Runtime State ============
@@ -51,6 +52,7 @@ class SystemState:
         self.recording = False
         self.record_label = None
         self.record_end_ts = None
+        self.record_session_id = None
 
         self.raw_values = [0, 0, 0, 0]
         self.norm_values = [0.0, 0.0, 0.0, 0.0]
@@ -65,9 +67,13 @@ class SystemState:
         self.last_blc_time = None
         self.sit_duration = 0  # Latest completed sit duration (seconds)
         self.model = None
+        self.blc_proba_threshold = DEFAULT_BLC_PROBA_THRESHOLD
+        self.default_blc_proba_threshold = DEFAULT_BLC_PROBA_THRESHOLD
+        self.user_blc_thresholds = {}
 
         self.db_path = Path(__file__).parent / "chair.db"
         self.json_path = Path(__file__).parent / "latest_result.json"
+        self.threshold_config_path = Path(__file__).parent / "threshold_config.json"
 
         # Hardware objects
         self.seesaw = None
@@ -76,6 +82,270 @@ class SystemState:
 
 
 state = SystemState()
+
+
+# ============ Threshold Utilities ============
+def ensure_database_schema(cursor):
+    """Create runtime and calibration tables when missing."""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sensor_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL,
+            user_id TEXT,
+            raw_values TEXT,
+            norm_values TEXT,
+            seattype INTEGER,
+            sit_duration REAL,
+            blc_bad INTEGER,
+            record_label TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calibration_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL,
+            user_id TEXT NOT NULL,
+            session_id TEXT,
+            label INTEGER NOT NULL,
+            label_name TEXT,
+            raw_values TEXT,
+            norm_values TEXT
+        )
+        """
+    )
+
+
+def compute_f1(y_true, y_pred):
+    """Compute binary F1 score for label=1."""
+    tp = 0
+    fp = 0
+    fn = 0
+    for yt, yp in zip(y_true, y_pred):
+        if yp == 1 and yt == 1:
+            tp += 1
+        elif yp == 1 and yt == 0:
+            fp += 1
+        elif yp == 0 and yt == 1:
+            fn += 1
+
+    if tp == 0:
+        return 0.0
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+    if precision + recall == 0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
+
+
+def parse_record_label(label):
+    """Normalize record_label into binary class: balanced=0, unbalanced=1."""
+    if label is None:
+        return None
+
+    s = str(label).strip().lower()
+    if s in {"0", "balanced", "balance", "good"}:
+        return 0
+    if s in {"1", "unbalanced", "bad", "imbalance"}:
+        return 1
+    return None
+
+
+def clamp_threshold(value):
+    """Clamp threshold to [0, 1]."""
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def load_threshold_config():
+    """Load threshold config: default + per-user mapping."""
+    default_thr = DEFAULT_BLC_PROBA_THRESHOLD
+    by_user = {}
+    try:
+        if not state.threshold_config_path.exists():
+            return default_thr, by_user
+
+        with open(state.threshold_config_path, "r") as f:
+            config = json.load(f)
+
+        # Backward compatible with old shape: {"blc_proba_threshold": 0.5}
+        if "blc_proba_threshold" in config and "default_threshold" not in config:
+            default_thr = clamp_threshold(float(config["blc_proba_threshold"]))
+        else:
+            default_thr = clamp_threshold(
+                float(config.get("default_threshold", DEFAULT_BLC_PROBA_THRESHOLD))
+            )
+
+        raw_by_user = config.get("by_user", {})
+        if isinstance(raw_by_user, dict):
+            for user_id, thr in raw_by_user.items():
+                try:
+                    by_user[str(user_id)] = clamp_threshold(float(thr))
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"[CALIB] Failed to load threshold config, using default: {e}")
+
+    return default_thr, by_user
+
+
+def save_threshold_config():
+    """Persist threshold config with default + per-user mapping."""
+    try:
+        payload = {
+            "default_threshold": float(state.default_blc_proba_threshold),
+            "by_user": state.user_blc_thresholds,
+        }
+        with open(state.threshold_config_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[CALIB] Saved threshold config: {state.threshold_config_path}")
+    except Exception as e:
+        print(f"[CALIB] Failed to save threshold config: {e}")
+
+
+def get_threshold_for_user(user_id):
+    """Resolve threshold for a user, falling back to default."""
+    if user_id:
+        key = str(user_id)
+        if key in state.user_blc_thresholds:
+            return state.user_blc_thresholds[key]
+    return state.default_blc_proba_threshold
+
+
+def apply_threshold_for_user(user_id):
+    """Apply threshold for the specified user to runtime state."""
+    state.blc_proba_threshold = get_threshold_for_user(user_id)
+    print(
+        f"[STATE] Applied threshold={state.blc_proba_threshold} for user_id={user_id} "
+        f"(default={state.default_blc_proba_threshold})"
+    )
+
+
+def load_calibration_xy(user_id):
+    """
+    Read calibration samples from SQLite and build (X, y).
+
+    Data source:
+    - table: calibration_samples
+    - filter: current user
+    - feature X: norm_values (len=4)
+    - label y: label (0 balanced, 1 unbalanced)
+    """
+    if not user_id:
+        return [], []
+
+    X = []
+    y = []
+    try:
+        conn = sqlite3.connect(state.db_path)
+        cursor = conn.cursor()
+        ensure_database_schema(cursor)
+        cursor.execute(
+            """
+            SELECT norm_values, label
+            FROM calibration_samples
+            WHERE user_id = ?
+            ORDER BY timestamp ASC
+            """,
+            (user_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        for norm_values_raw, label in rows:
+            if label not in (0, 1):
+                continue
+            try:
+                values = json.loads(norm_values_raw)
+            except Exception:
+                continue
+
+            if not isinstance(values, list) or len(values) != 4:
+                continue
+
+            try:
+                feature = [float(v) for v in values]
+            except Exception:
+                continue
+
+            X.append(feature)
+            y.append(label)
+    except Exception as e:
+        print(f"[CALIB] Failed to load calibration samples: {e}")
+
+    return X, y
+
+
+def pick_threshold(model, X_val, y_val, step=0.01):
+    """Scan thresholds and return the best one by F1 score."""
+    if model is None:
+        raise ValueError("Model is not loaded")
+    if not X_val or not y_val:
+        raise ValueError("Validation set is empty")
+    if not hasattr(model, "predict_proba"):
+        raise ValueError("Model does not support predict_proba")
+
+    proba = model.predict_proba(X_val)
+    p_bad = [float(row[1]) for row in proba]
+
+    best_thr = DEFAULT_BLC_PROBA_THRESHOLD
+    best_f1 = -1.0
+
+    thr = 0.05
+    while thr <= 0.95 + 1e-9:
+        y_hat = [1 if p >= thr else 0 for p in p_bad]
+        f1 = compute_f1(y_val, y_hat)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thr = round(float(thr), 4)
+        thr += step
+
+    return best_thr, best_f1
+
+
+def recalibrate_threshold_from_db(user_id):
+    """
+    Recompute threshold from calibration samples and persist it.
+    Returns (ok, message).
+    """
+    if state.model is None:
+        return False, "model is not loaded"
+
+    X, y = load_calibration_xy(user_id)
+    if not X:
+        return False, f"no calibration samples found for user={user_id}"
+
+    count_balanced = sum(1 for label in y if label == 0)
+    count_unbalanced = sum(1 for label in y if label == 1)
+    if count_balanced == 0 or count_unbalanced == 0:
+        return (
+            False,
+            f"need both classes; got balanced={count_balanced}, unbalanced={count_unbalanced}",
+        )
+
+    try:
+        best_thr, best_f1 = pick_threshold(state.model, X, y)
+    except Exception as e:
+        return False, f"pick_threshold failed: {e}"
+
+    user_key = str(user_id) if user_id is not None else None
+    if user_key:
+        state.user_blc_thresholds[user_key] = best_thr
+        if state.current_user_id is not None and str(state.current_user_id) == user_key:
+            state.blc_proba_threshold = best_thr
+    save_threshold_config()
+    return (
+        True,
+        f"recalibrated threshold={best_thr} with f1={best_f1:.3f}, "
+        f"samples={len(y)} (balanced={count_balanced}, unbalanced={count_unbalanced})",
+    )
 
 
 # ============ Hardware Initialization ============
@@ -187,7 +457,7 @@ def detect_seattype(norm_values):
     return 1 if pressure_sum > SEATTYPE_THRESHOLD else 0
 
 
-def detect_bad_balance(norm_values, model=None):
+def detect_bad_balance(norm_values, model=None, proba_threshold=DEFAULT_BLC_PROBA_THRESHOLD):
     """
     Infer whether posture is unbalanced.
     Uses model prediction when available; otherwise falls back to variance rule.
@@ -197,6 +467,9 @@ def detect_bad_balance(norm_values, model=None):
 
     if model is not None:
         try:
+            if hasattr(model, "predict_proba"):
+                p_bad = float(model.predict_proba([norm_values])[0][1])
+                return 1 if p_bad >= proba_threshold else 0
             return int(model.predict([norm_values])[0])
         except Exception as e:
             print(f"[WARN] Model prediction failed, using variance fallback: {e}")
@@ -271,7 +544,9 @@ def update_state():
 
     # 3) Inference
     state.seattype = detect_seattype(state.norm_values)
-    state.blc_bad = detect_bad_balance(state.norm_values, state.model)
+    state.blc_bad = detect_bad_balance(
+        state.norm_values, state.model, state.blc_proba_threshold
+    )
 
     # Detect seated-state transition.
     state.seattype_changed = prev_seattype != state.seattype
@@ -330,6 +605,7 @@ def get_state_payload():
         "norm_values": state.norm_values,
         "seattype": state.seattype,
         "blc_bad": state.blc_bad,
+        "blc_threshold": state.blc_proba_threshold,
         "time_sit": state.time_sit,
         "time_blc": state.time_blc,
         "should_vibrate": state.should_vibrate,
@@ -363,69 +639,94 @@ def load_user_id_from_db():
 
 def write_to_database(payload):
     """
-    Write transition rows to SQLite.
+    Write runtime logs and calibration samples to SQLite.
 
-    Current write rule:
+    Runtime log rule:
     - user_id is set, and
     - seattype changed in this cycle.
+
+    Calibration sample rule:
+    - user_id is set, and
+    - recording mode is active, and
+    - record_label is valid (balanced/unbalanced).
     """
-    should_record = state.current_user_id is not None and state.seattype_changed
+    has_user = state.current_user_id is not None
+    should_write_runtime = has_user and state.seattype_changed
+
+    calib_label = parse_record_label(state.record_label)
+    should_write_calibration = has_user and state.recording and calib_label is not None
 
     print(
-        "[DB] Record check: "
+        "[DB] Write check: "
         f"user_id={state.current_user_id}, "
         f"seattype_changed={state.seattype_changed}, "
-        f"should_record={should_record}"
+        f"recording={state.recording}, "
+        f"runtime={should_write_runtime}, "
+        f"calibration={should_write_calibration}"
     )
 
-    if not should_record:
+    if not should_write_runtime and not should_write_calibration:
         return
 
     try:
         conn = sqlite3.connect(state.db_path)
         cursor = conn.cursor()
+        ensure_database_schema(cursor)
 
-        # Create table if needed.
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sensor_data (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL,
-                user_id TEXT,
-                raw_values TEXT,
-                norm_values TEXT,
-                seattype INTEGER,
-                sit_duration REAL,
-                blc_bad INTEGER,
-                record_label TEXT
+        if should_write_runtime:
+            cursor.execute(
+                """
+                INSERT INTO sensor_data
+                (timestamp, user_id, raw_values, norm_values, seattype, sit_duration, blc_bad, record_label)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["timestamp"],
+                    state.current_user_id,
+                    json.dumps(payload["raw_values"]),
+                    json.dumps(payload["norm_values"]),
+                    payload["seattype"],
+                    payload["sit_duration"],
+                    payload["blc_bad"],
+                    None,
+                ),
             )
-            """
-        )
 
-        cursor.execute(
-            """
-            INSERT INTO sensor_data
-            (timestamp, user_id, raw_values, norm_values, seattype, sit_duration, blc_bad, record_label)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload["timestamp"],
-                state.current_user_id,
-                json.dumps(payload["raw_values"]),
-                json.dumps(payload["norm_values"]),
-                payload["seattype"],
-                payload["sit_duration"],
-                payload["blc_bad"],
-                state.record_label,
-            ),
-        )
+        if should_write_calibration:
+            cursor.execute(
+                """
+                INSERT INTO calibration_samples
+                (timestamp, user_id, session_id, label, label_name, raw_values, norm_values)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["timestamp"],
+                    state.current_user_id,
+                    state.record_session_id,
+                    calib_label,
+                    str(state.record_label),
+                    json.dumps(payload["raw_values"]),
+                    json.dumps(payload["norm_values"]),
+                ),
+            )
 
         conn.commit()
         conn.close()
 
-        status = "seated" if payload["seattype"] == 1 else "left seat"
-        duration_str = f"duration={payload['sit_duration']}s" if payload["seattype"] == 0 else ""
-        print(f"[DB] Recorded: user {state.current_user_id} {status} {duration_str} | blc_bad={payload['blc_bad']}")
+        if should_write_runtime:
+            status = "seated" if payload["seattype"] == 1 else "left seat"
+            duration_str = (
+                f"duration={payload['sit_duration']}s" if payload["seattype"] == 0 else ""
+            )
+            print(
+                f"[DB] Runtime row saved: user {state.current_user_id} "
+                f"{status} {duration_str} | blc_bad={payload['blc_bad']}"
+            )
+        if should_write_calibration:
+            print(
+                f"[DB] Calibration row saved: user={state.current_user_id}, "
+                f"session_id={state.record_session_id}, label={calib_label}"
+            )
 
     except Exception as e:
         print(f"[DB] Error: {e}")
@@ -463,23 +764,41 @@ def on_message(client, userdata, msg):
         if "user_id" in payload:
             state.current_user_id = payload["user_id"]
             print(f"[STATE] user_id set to: {state.current_user_id}")
+            apply_threshold_for_user(state.current_user_id)
 
         # Update recording state
         if "recording" in payload:
             state.recording = payload["recording"]
-            state.record_label = payload.get("label", None)
             if state.recording:
+                state.record_label = payload.get("label", None)
                 duration = payload.get("duration", 60)
                 state.record_end_ts = time.time() + duration
+                state.record_session_id = (
+                    f"{state.current_user_id}_{int(time.time() * 1000)}"
+                )
                 print(f"[REC] Recording started: label={state.record_label}, duration={duration}s")
             else:
                 print("[REC] Recording stopped")
+                state.record_end_ts = None
+                state.record_label = None
+                state.record_session_id = None
+                ok, message = recalibrate_threshold_from_db(state.current_user_id)
+                print(f"[CALIB] Auto recalibration after recording stop: ok={ok}, {message}")
 
-        # Calibration command (placeholder)
+        # Calibration command
         if "calibrate" in payload:
             calib_type = payload["calibrate"]
             print(f"[CALIB] Calibration command received: {calib_type}")
-            # TODO: implement calibration logic
+            if str(calib_type).lower() in {
+                "recompute",
+                "recompute_threshold",
+                "threshold",
+                "done",
+                "finish",
+            }:
+                user_id = payload.get("user_id", state.current_user_id)
+                ok, message = recalibrate_threshold_from_db(user_id)
+                print(f"[CALIB] Manual recalibration result: ok={ok}, {message}")
 
     except json.JSONDecodeError:
         print("[ERROR] Failed to parse MQTT payload as JSON")
@@ -525,11 +844,19 @@ def main():
     except Exception as e:
         print(f"[WARN] Failed to load model, using fallback rule: {e}")
 
+    # 3.2) Load threshold config (default + per-user)
+    (
+        state.default_blc_proba_threshold,
+        state.user_blc_thresholds,
+    ) = load_threshold_config()
+    apply_threshold_for_user(None)
+
     # 3.5) Restore user_id from DB (session persistence)
     print("[INIT] Restoring user_id from DB...")
     state.current_user_id = load_user_id_from_db()
     if state.current_user_id:
         print(f"[STATE] Restored user_id: {state.current_user_id}")
+        apply_threshold_for_user(state.current_user_id)
     else:
         print("[STATE] No previous user_id found; waiting for dashboard sync")
 
@@ -573,7 +900,12 @@ def main():
             # Auto-stop recording when timer expires
             if state.recording and state.record_end_ts and time.time() > state.record_end_ts:
                 state.recording = False
+                state.record_end_ts = None
+                state.record_label = None
+                state.record_session_id = None
                 print("[REC] Recording window completed")
+                ok, message = recalibrate_threshold_from_db(state.current_user_id)
+                print(f"[CALIB] Auto recalibration after timed recording: ok={ok}, {message}")
 
             # Sampling interval
             time.sleep(1.0)

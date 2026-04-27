@@ -14,9 +14,9 @@ let latestMqttData = {
 
 // 初始化 MQTT 连接（连接到树莓派本地 broker）
 function initMQTT() {
-  console.log('[Electron] Connecting to MQTT broker at 172.28.54.209:1883...');
+  console.log('[Electron] Connecting to MQTT broker at 172.20.4.137:1883...');
   
-  mqttClient = mqtt.connect('mqtt://172.28.54.209:1883', {
+  mqttClient = mqtt.connect('mqtt://172.20.4.137:1883', {
     clientId: 'electron-chair-' + Date.now(),
     reconnectPeriod: 3000,
     connectTimeout: 10000
